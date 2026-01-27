@@ -11,13 +11,15 @@ conda activate security
 
 ### Installing Torch w/ cuda
 
-Go to this page: https://pytorch.org/get-started/locally/
+To utilize cuda, install torch according to this page: https://pytorch.org/get-started/locally/
 
-I'm personally running: 
+For example:
 
 ```
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 ```
+
+If no GPU, pip install torch and torchvision normally. 
 
 ### Install remaining dependencies
 
@@ -27,4 +29,6 @@ pip install -r requirements.txt
 
 ### Run Code
 
-Check out ``` main.ipynb ```
+```
+python main.py
+```

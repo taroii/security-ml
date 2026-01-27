@@ -209,3 +209,4 @@ __marimo__/
 # NEW 
 .vscode/
 data/
+cifar10_resnet50_embed.pt
