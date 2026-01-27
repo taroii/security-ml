@@ -71,6 +71,7 @@ def embed_cifar10_resnet50(
     """
     if os.path.exists(cache_path):
         obj = torch.load(cache_path, map_location="cpu")
+        print("Using cached embeddings.\n")
         return obj["Xtr"], obj["ytr"], obj["Xte"], obj["yte"]
 
     weights = ResNet50_Weights.IMAGENET1K_V2
@@ -205,6 +206,9 @@ def obfuscate_training(
     Xm = Xm.to(device, dtype=torch.float32)
     Ym = Ym.to(device, dtype=torch.float32)
     W = W.to(device)
+    perm1 = perm1.to(device)
+    perm2 = perm2.to(device)
+    inv_perm2 = inv_perm2.to(device)
 
     Xw = Xm @ W                         # (m, d)
     Xw = Xw[perm1]                      # Π1
@@ -250,8 +254,7 @@ def eval_model_baseline(model, Xte, yte, device, batch_size=512):
         total += y.numel()
     return 100.0 * correct / total
 
-
-def main():
+if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--epochs", type=int, default=10)
@@ -283,9 +286,7 @@ def main():
     Xn, yn = stratified_subset(Xtr, ytr, n=args.n, c=c, seed=args.seed)
     print(f"subset: X={Xn.shape}, y={yn.shape}")
 
-    # ----------------------------
-    # Baseline training for comparison
-    # ----------------------------
+    ### Baseline training for comparison
     print("\nTraining baseline model (no obfuscation):")
 
     model_baseline = MLP(input_dim=d0, num_classes=c).to(device)
@@ -313,9 +314,7 @@ def main():
         acc_baseline = eval_model_baseline(model_baseline, Xte, yte, device=device)
         print(f"Epoch {ep}: test acc = {acc_baseline:.2f}%")
 
-    # ----------------------------
-    # Obfuscated model training
-    # ----------------------------
+    ### Obfuscated model training
     print("\nTraining obfuscated model")
 
     # 3) Build mixed dataset of size m using paper's class-k-mixing  [oai_citation:15‡People](https://people.csail.mit.edu/devadas/pubs/Learnable_Obfuscation.pdf)
@@ -358,8 +357,3 @@ def main():
     print(f"Baseline (no obfuscation): {final_baseline:.2f}%")
     print(f"Obfuscated:                {final_obf:.2f}%")
     print(f"Accuracy gap:              {final_baseline - final_obf:.2f}%")
-
-
-if __name__ == "__main__":
-    # IMPORTANT on macOS: avoids the multiprocessing spawn crash you hit.
-    main()
