@@ -1,1 +1,4 @@
 ipykernel
+opencv-python
+numpy
+rarfile
