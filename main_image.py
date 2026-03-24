@@ -266,7 +266,7 @@ if __name__ == "__main__":
     ap.add_argument("--k", type=int, default=5)        # mix number
     ap.add_argument("--sigma", type=float, default=0.03)
 
-    ap.add_argument("--d", type=int, default=500)      # output dim after masking (paper uses d=500)  [oai_citation:13‡People](https://people.csail.mit.edu/devadas/pubs/Learnable_Obfuscation.pdf)
+    ap.add_argument("--d", type=int, default=None)      # output dim after masking (defaults to d0, i.e. square W per Theorem 7)  [oai_citation:13‡People](https://people.csail.mit.edu/devadas/pubs/Learnable_Obfuscation.pdf)
     ap.add_argument("--embed_bs", type=int, default=256)
     ap.add_argument("--train_bs", type=int, default=256)
     ap.add_argument("--cache", type=str, default="./cifar10_resnet50_embed.pt")
@@ -280,6 +280,8 @@ if __name__ == "__main__":
     Xtr, ytr, Xte, yte = embed_cifar10_resnet50(device, args.embed_bs, args.cache)
     c = 10
     d0 = Xtr.shape[1]
+    if args.d is None:
+        args.d = d0  # square W per Theorem 7
     print(f"embedding dim d0={d0}")
 
     # 2) Subsample n points (balanced per class)
@@ -289,22 +291,22 @@ if __name__ == "__main__":
     ### Baseline training for comparison
     print("\nTraining baseline model (no obfuscation):")
 
-    model_baseline = MLP(input_dim=d0, num_classes=c).to(device)
+    model_baseline = MLP(input_dim=args.d, num_classes=c).to(device)
     opt_baseline = optim.Adam(model_baseline.parameters(), lr=args.lr)
 
-    Xn_dev = Xn.to(device, dtype=torch.float32)
-    yn_dev = yn.to(device)
-    n_train = Xn.shape[0]
+    Xtr_dev = Xtr.to(device, dtype=torch.float32)
+    ytr_dev = ytr.to(device)
+    n_train = Xtr.shape[0]
 
     for ep in range(args.epochs):
         model_baseline.train()
         perm = torch.randperm(n_train, device=device)
-        Xn_ep = Xn_dev[perm]
-        yn_ep = yn_dev[perm]
+        Xtr_ep = Xtr_dev[perm]
+        ytr_ep = ytr_dev[perm]
 
         for s in range(0, n_train, args.train_bs):
-            xb = Xn_ep[s:s+args.train_bs]
-            yb = yn_ep[s:s+args.train_bs]
+            xb = Xtr_ep[s:s+args.train_bs]
+            yb = ytr_ep[s:s+args.train_bs]
             opt_baseline.zero_grad()
             logits = model_baseline(xb)
             loss = F.cross_entropy(logits, yb)

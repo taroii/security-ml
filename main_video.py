@@ -7,14 +7,14 @@ baseline (no obfuscation) against the paper's Algorithm 1 obfuscation
 permutation Π₃, and Gaussian noise B).
 
 Usage:
-    # Transformer (default) with 16 frames per video
+    # Transformer (default) with 250 frames per video
     python main_video.py
 
-    # LSTM with 32 frames
-    python main_video.py --model lstm --num_frames 32
+    # LSTM with 128 frames
+    python main_video.py --model lstm --num_frames 128
 
     # Custom obfuscation parameters
-    python main_video.py --model transformer --k 10 --sigma 0.05 --d 512
+    python main_video.py --model transformer --k 10 --sigma 0.05
 
     # Use a different UCF-101 split and data location
     python main_video.py --split 2 --video_root /path/to/UCF-101 --annot_root /path/to/ucfTrainTestlist
@@ -216,10 +216,12 @@ def download_ucf101(data_root: str, video_root: str, annot_root: str):
 # ----------------------------
 # Video loading (per-frame)
 # ----------------------------
-def load_video_frames(path: str, num_frames: int = 16, size: int = 224) -> torch.Tensor:
+
+def load_video_frames(path: str, num_frames: int, size: int = 224) -> torch.Tensor:
     """
-    Read a video file, uniformly subsample to `num_frames` frames, resize to (size, size).
-    Returns a float tensor of shape (T, 3, H, W) in [0, 1].
+    Read a video file. If longer than `num_frames`, uniformly subsample.
+    If shorter, pad by repeating the last frame.
+    Returns a float tensor of shape (num_frames, 3, H, W) in [0, 1].
     """
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -238,14 +240,14 @@ def load_video_frames(path: str, num_frames: int = 16, size: int = 224) -> torch
     if len(frames) == 0:
         raise RuntimeError(f"No frames read from video: {path}")
 
-    # Pad by repeating last frame if too short
+    # Pad by repeating last frame if shorter than num_frames
     while len(frames) < num_frames:
         frames.append(frames[-1])
 
-    # Uniformly subsample to num_frames
-    total = len(frames)
-    indices = np.linspace(0, total - 1, num_frames, dtype=int)
-    frames = [frames[i] for i in indices]
+    # Uniformly subsample if longer than num_frames
+    if len(frames) > num_frames:
+        indices = np.linspace(0, len(frames) - 1, num_frames, dtype=int)
+        frames = [frames[i] for i in indices]
 
     clip = np.stack(frames, axis=0)                  # (T, H, W, 3)
     clip = torch.from_numpy(clip).float() / 255.0    # (T, H, W, 3)
@@ -339,7 +341,7 @@ def embed_ucf101_per_frame(
     device: torch.device,
     batch_size: int,
     cache_path: str,
-    num_frames: int = 16,
+    num_frames: int = 250,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Embed each frame of each UCF-101 video independently with ResNet-50.
@@ -393,7 +395,7 @@ def embed_ucf101_per_frame(
             f = f / (f.norm(dim=-1, keepdim=True) + 1e-12)  # L2 normalize per frame
             feats.append(f.cpu())
             labs.append(y.cpu())
-            if (i + 1) % 10 == 0 or (i + 1) == total_batches:
+            if (i + 1) % 100 == 0 or (i + 1) == total_batches:
                 print(f"  {desc}: batch {i+1}/{total_batches}")
         return torch.cat(feats, dim=0), torch.cat(labs, dim=0)
 
@@ -568,8 +570,8 @@ if __name__ == "__main__":
     ap.add_argument("--model", type=str, default="transformer",
                     choices=["lstm", "transformer"],
                     help="temporal classifier architecture")
-    ap.add_argument("--num_frames", type=int, default=16,
-                    help="number of frames to sample per video")
+    ap.add_argument("--num_frames", type=int, default=250,
+                    help="frames per video (longer videos subsampled, shorter ones padded)")
 
     # Paper-style knobs
     ap.add_argument("--n", type=int, default=5050,
@@ -579,8 +581,8 @@ if __name__ == "__main__":
     ap.add_argument("--k", type=int, default=5, help="mix number")
     ap.add_argument("--sigma", type=float, default=0.03)
 
-    ap.add_argument("--d", type=int, default=256,
-                    help="output dim after projection (must be divisible by nhead=8 for transformer)")
+    ap.add_argument("--d", type=int, default=None,
+                    help="output dim after projection (defaults to d0, i.e. square W per Theorem 7)")
     ap.add_argument("--embed_bs", type=int, default=4,
                     help="batch size for embedding extraction (videos × frames are large)")
     ap.add_argument("--train_bs", type=int, default=64)
@@ -611,6 +613,8 @@ if __name__ == "__main__":
         device, args.embed_bs, args.cache, num_frames=args.num_frames,
     )
     d0 = Xtr.shape[2]  # 2048
+    if args.d is None:
+        args.d = d0  # square W per Theorem 7
     print(f"Train: {Xtr.shape[0]} videos × {Xtr.shape[1]} frames × {d0}d")
     print(f"Test:  {Xte.shape[0]} videos × {Xte.shape[1]} frames × {d0}d")
 
@@ -630,22 +634,22 @@ if __name__ == "__main__":
     ### Baseline training for comparison
     print("\nTraining baseline model (no obfuscation):")
 
-    model_baseline = make_model(d0)
+    model_baseline = make_model(args.d)
     opt_baseline = optim.Adam(model_baseline.parameters(), lr=args.lr)
 
-    Xn_dev = Xn.to(device, dtype=torch.float32)
-    yn_dev = yn.to(device)
-    n_train = Xn.shape[0]
+    Xtr_dev = Xtr.to(device, dtype=torch.float32)
+    ytr_dev = ytr.to(device)
+    n_train = Xtr.shape[0]
 
     for ep in range(args.epochs):
         model_baseline.train()
         perm = torch.randperm(n_train, device=device)
-        Xn_ep = Xn_dev[perm]
-        yn_ep = yn_dev[perm]
+        Xtr_ep = Xtr_dev[perm]
+        ytr_ep = ytr_dev[perm]
 
         for s in range(0, n_train, args.train_bs):
-            xb = Xn_ep[s:s+args.train_bs]
-            yb = yn_ep[s:s+args.train_bs]
+            xb = Xtr_ep[s:s+args.train_bs]
+            yb = ytr_ep[s:s+args.train_bs]
             opt_baseline.zero_grad()
             logits = model_baseline(xb)
             loss = F.cross_entropy(logits, yb)
