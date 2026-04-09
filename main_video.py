@@ -30,7 +30,8 @@ import subprocess
 import sys
 import urllib.request
 import zipfile
-from typing import Tuple, List
+from pathlib import Path
+from typing import Dict, Optional, Tuple, List
 
 import cv2
 import numpy as np
@@ -217,10 +218,92 @@ def download_ucf101(data_root: str, video_root: str, annot_root: str):
 # Video loading (per-frame)
 # ----------------------------
 
+def count_video_frames(path: str) -> int:
+    """Return the number of frames in a video, falling back to manual counting."""
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {path}")
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if frame_count > 0:
+        cap.release()
+        return frame_count
+
+    frame_count = 0
+    while True:
+        ret, _ = cap.read()
+        if not ret:
+            break
+        frame_count += 1
+    cap.release()
+    return frame_count
+
+
+def analyze_frame_counts(
+    video_root: str,
+    train_list: List[Tuple[str, int]],
+    test_list: List[Tuple[str, int]],
+    split: int,
+) -> Tuple[int, Dict[str, int], str]:
+    """
+    Compute frame-count statistics over the active split, save a histogram,
+    and choose a fixed clip length as mean + 2 * std.
+    """
+    all_samples = train_list + test_list
+    frame_counts: Dict[str, int] = {}
+    counts = []
+
+    print("Scanning frame counts to choose a fixed clip length...")
+    for idx, (rel_path, _) in enumerate(all_samples, start=1):
+        video_path = os.path.join(video_root, rel_path)
+        n_frames = count_video_frames(video_path)
+        frame_counts[rel_path] = n_frames
+        counts.append(n_frames)
+        if idx % 500 == 0 or idx == len(all_samples):
+            print(f"  counted {idx}/{len(all_samples)} videos")
+
+    counts_np = np.array(counts, dtype=np.float32)
+    mean_frames = float(counts_np.mean())
+    std_frames = float(counts_np.std())
+    frame_limit = max(1, int(math.ceil(mean_frames + 2.0 * std_frames)))
+
+    plot_path = os.path.abspath(f"./ucf101_frame_count_distribution_split{split}.png")
+    try:
+        import matplotlib.pyplot as plt
+
+        plt.figure(figsize=(9, 5))
+        plt.hist(counts_np, bins=50, color="#1f77b4", alpha=0.85, edgecolor="black")
+        plt.axvline(mean_frames, color="orange", linestyle="--", linewidth=2, label=f"mean={mean_frames:.1f}")
+        plt.axvline(frame_limit, color="red", linestyle="-", linewidth=2, label=f"mean+2std={frame_limit}")
+        plt.title(f"UCF-101 Split {split} Frame Count Distribution")
+        plt.xlabel("Frames per video")
+        plt.ylabel("Number of videos")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=160)
+        plt.close()
+        print(f"Saved frame-count distribution plot to {plot_path}")
+    except Exception as e:
+        print(f"Skipping histogram plot because matplotlib is unavailable: {e}")
+
+    print(f"Frame-count stats: mean={mean_frames:.2f}, std={std_frames:.2f}, limit={frame_limit}")
+    return frame_limit, frame_counts, plot_path
+
+
+def filter_samples_by_frame_limit(
+    samples: List[Tuple[str, int]],
+    frame_counts: Dict[str, int],
+    frame_limit: int,
+) -> List[Tuple[str, int]]:
+    """Keep only videos whose frame count is at most the chosen fixed length."""
+    return [sample for sample in samples if frame_counts[sample[0]] <= frame_limit]
+
+
 def load_video_frames(path: str, num_frames: int, size: int = 224) -> torch.Tensor:
     """
-    Read a video file. If longer than `num_frames`, uniformly subsample.
-    If shorter, pad by repeating the last frame.
+    Read a video file. If shorter than `num_frames`, pad with black frames.
+    Videos longer than `num_frames` should already have been filtered out,
+    but we keep uniform subsampling as a safety fallback.
     Returns a float tensor of shape (num_frames, 3, H, W) in [0, 1].
     """
     cap = cv2.VideoCapture(path)
@@ -240,9 +323,9 @@ def load_video_frames(path: str, num_frames: int, size: int = 224) -> torch.Tens
     if len(frames) == 0:
         raise RuntimeError(f"No frames read from video: {path}")
 
-    # Pad by repeating last frame if shorter than num_frames
+    # Pad with black frames if shorter than num_frames
     while len(frames) < num_frames:
-        frames.append(frames[-1])
+        frames.append(np.zeros_like(frames[0]))
 
     # Uniformly subsample if longer than num_frames
     if len(frames) > num_frames:
@@ -331,34 +414,58 @@ class UCF101Dataset(Dataset):
 
 
 # ----------------------------
-# Per-frame embedding with ResNet-50
+# Raw-video obfuscation + per-frame embedding with ResNet-50
 # ----------------------------
+def apply_raw_video_obfuscation(
+    clips: torch.Tensor,
+    temporal_proj: torch.Tensor,
+    sigma: float,
+    perm_frames: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Obfuscate raw clips before ResNet embedding.
+    Applies a shared random projection along the temporal axis so each output
+    frame stays image-shaped, adds Gaussian noise, and permutes frame order
+    with a fixed permutation shared across samples.
+    """
+    obf = torch.einsum("btchw,ts->bschw", clips, temporal_proj)
+    obf = obf + torch.randn_like(obf) * sigma
+    obf = obf[:, perm_frames]
+    # Keep values in the range expected by the pretrained ResNet.
+    return obf.clamp(0.0, 1.0)
+
+
 @torch.no_grad()
 def embed_ucf101_per_frame(
     video_root: str,
-    annot_root: str,
-    split: int,
+    samples: List[Tuple[str, int]],
     device: torch.device,
     batch_size: int,
     cache_path: str,
     num_frames: int = 250,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    sigma: float = 0.0,
+    obfuscate_before_embedding: bool = False,
+    obf_seed: Optional[int] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Embed each frame of each UCF-101 video independently with ResNet-50.
     Returns:
-      Xtr: (N_train, T, 2048) float32
-      ytr: (N_train,) int64
-      Xte: (N_test, T, 2048) float32
-      yte: (N_test,) int64
+      X: (N, T, 2048) float32
+      y: (N,) int64
     """
     if os.path.exists(cache_path):
         obj = torch.load(cache_path, map_location="cpu")
-        print("Using cached per-frame embeddings.\n")
-        return obj["Xtr"], obj["ytr"], obj["Xte"], obj["yte"]
-
-    # Parse split annotations
-    _, train_list, test_list = parse_ucf101_split(annot_root, split)
-    print(f"UCF-101 split {split}: {len(train_list)} train, {len(test_list)} test")
+        metadata_ok = (
+            obj.get("num_frames") == num_frames
+            and obj.get("sigma") == sigma
+            and obj.get("obfuscate_before_embedding") == obfuscate_before_embedding
+            and obj.get("obf_seed") == obf_seed
+            and obj.get("sample_paths") == [rel_path for rel_path, _ in samples]
+        )
+        if metadata_ok:
+            print("Using cached per-frame embeddings.\n")
+            return obj["X"], obj["y"]
+        print(f"Cache mismatch at {cache_path}; rebuilding embeddings.\n")
 
     # Load pretrained ResNet-50 and remove FC head
     weights = ResNet50_Weights.IMAGENET1K_V2
@@ -370,43 +477,66 @@ def embed_ucf101_per_frame(
     img_mean = torch.tensor(weights.transforms().mean).view(1, 3, 1, 1).to(device)
     img_std = torch.tensor(weights.transforms().std).view(1, 3, 1, 1).to(device)
 
+    temporal_proj = None
+    perm_frames = None
+    if obfuscate_before_embedding:
+        if obf_seed is None:
+            raise ValueError("obf_seed must be provided when obfuscate_before_embedding=True")
+        g = torch.Generator(device="cpu").manual_seed(obf_seed)
+        temporal_proj = torch.randn(num_frames, num_frames, generator=g, dtype=torch.float32)
+        temporal_proj *= 1.0 / math.sqrt(num_frames)
+        perm_frames = torch.randperm(num_frames, generator=g)
+        temporal_proj = temporal_proj.to(device)
+        perm_frames = perm_frames.to(device)
+
     def collate_fn(batch):
         clips, labels = zip(*batch)
         clips = torch.stack(clips, dim=0)       # (B, T, 3, H, W)
         labels = torch.tensor(labels, dtype=torch.long)
         return clips, labels
 
-    def run(samples, desc):
-        dataset = UCF101Dataset(video_root, samples, num_frames=num_frames, size=224)
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=False,
-            num_workers=0, collate_fn=collate_fn,
-        )
-        feats = []
-        labs = []
-        total_batches = len(loader)
-        for i, (clips, y) in enumerate(loader):
-            B, T = clips.shape[:2]
-            # Flatten videos into individual frames
-            frames = clips.view(B * T, 3, 224, 224).to(device)
-            frames = (frames - img_mean) / img_std
-            f = model(frames)                       # (B*T, 2048)
-            f = f.float().view(B, T, -1)            # (B, T, 2048)
-            f = f / (f.norm(dim=-1, keepdim=True) + 1e-12)  # L2 normalize per frame
-            feats.append(f.cpu())
-            labs.append(y.cpu())
-            if (i + 1) % 100 == 0 or (i + 1) == total_batches:
-                print(f"  {desc}: batch {i+1}/{total_batches}")
-        return torch.cat(feats, dim=0), torch.cat(labs, dim=0)
+    dataset = UCF101Dataset(video_root, samples, num_frames=num_frames, size=224)
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False,
+        num_workers=0, collate_fn=collate_fn,
+    )
+    feats = []
+    labs = []
+    total_batches = len(loader)
+    for i, (clips, y) in enumerate(loader):
+        B, T = clips.shape[:2]
+        clips = clips.to(device, dtype=torch.float32)
+        if obfuscate_before_embedding:
+            clips = apply_raw_video_obfuscation(clips, temporal_proj, sigma, perm_frames)
 
-    print("Extracting per-frame train embeddings...")
-    Xtr, ytr = run(train_list, "train")
-    print("Extracting per-frame test embeddings...")
-    Xte, yte = run(test_list, "test")
+        # Flatten videos into individual frames
+        frames = clips.view(B * T, 3, 224, 224)
+        frames = (frames - img_mean) / img_std
+        f = model(frames)                       # (B*T, 2048)
+        f = f.float().view(B, T, -1)            # (B, T, 2048)
+        f = f / (f.norm(dim=-1, keepdim=True) + 1e-12)  # L2 normalize per frame
+        feats.append(f.cpu())
+        labs.append(y.cpu())
+        if (i + 1) % 100 == 0 or (i + 1) == total_batches:
+            print(f"  embedding batch {i+1}/{total_batches}")
 
-    torch.save({"Xtr": Xtr, "ytr": ytr, "Xte": Xte, "yte": yte}, cache_path)
+    X = torch.cat(feats, dim=0)
+    y = torch.cat(labs, dim=0)
+
+    torch.save(
+        {
+            "X": X,
+            "y": y,
+            "num_frames": num_frames,
+            "sigma": sigma,
+            "obfuscate_before_embedding": obfuscate_before_embedding,
+            "obf_seed": obf_seed,
+            "sample_paths": [rel_path for rel_path, _ in samples],
+        },
+        cache_path,
+    )
     print(f"Per-frame embeddings cached to {cache_path}\n")
-    return Xtr, ytr, Xte, yte
+    return X, y
 
 
 # ----------------------------
@@ -473,24 +603,18 @@ def make_k_mixed_dataset(
     return Xm, Ym
 
 
-def obfuscate_training(
+def permute_training_labels(
     Xm: torch.Tensor,
     Ym: torch.Tensor,
-    d: int,
-    sigma: float,
     seed: int,
     device: torch.device,
 ):
     """
-    Algorithm 1 adapted for frame sequences.
-    Xm: (m, T, d0) — W projection applied per-frame via matmul broadcasting.
-    Π₃ permutes the temporal order of frames to hide sequential structure.
-    Returns Xt: (m, T, d), Yt: (m, c), and transforms for inference.
+    After raw-video obfuscation and embedding, keep the label-side privacy step:
+    permute sample order (Π₁) and permute label columns (Π₂).
     """
-    m, T, d0 = Xm.shape
+    m = Xm.shape[0]
     g = torch.Generator(device="cpu").manual_seed(seed)
-
-    W = torch.randn(d0, d, generator=g, dtype=torch.float32) * (1.0 / math.sqrt(d))
 
     perm1 = torch.randperm(m, generator=g)
 
@@ -499,41 +623,30 @@ def obfuscate_training(
     inv_perm2[perm2] = torch.arange(len(perm2))
 
     # Π₃: fixed frame-order permutation (shared across all samples)
-    perm_frames = torch.randperm(T, generator=g)
-
     Xm = Xm.to(device, dtype=torch.float32)
     Ym = Ym.to(device, dtype=torch.float32)
-    W = W.to(device)
     perm1 = perm1.to(device)
     perm2 = perm2.to(device)
     inv_perm2 = inv_perm2.to(device)
-    perm_frames = perm_frames.to(device)
 
-    Xw = Xm @ W          # (m, T, d) via broadcasting
-    Xw = Xw[perm1]       # Π₁
-    B = torch.randn_like(Xw) * sigma
-    Xt = Xw + B
-    Xt = Xt[:, perm_frames]  # Π₃: permute frame order
+    Xt = Xm[perm1]       # Π₁ on rows only; raw clips were already obfuscated
 
     Yp = Ym[:, perm2]    # Π₂ on columns
     Yt = Yp[perm1]       # Π₁ on rows
 
-    return Xt, Yt, W, perm2, inv_perm2, perm_frames
+    return Xt, Yt, perm2, inv_perm2
 
 
 @torch.no_grad()
-def eval_model(model, Xte, yte, W, inv_perm2, perm_frames, device, batch_size=64):
-    """Evaluate obfuscated temporal model (applies W projection per-frame,
-    Π₃ frame permutation, and inverts label permutation)."""
+def eval_model(model, Xte, yte, inv_perm2, device, batch_size=64):
+    """Evaluate obfuscated temporal model after raw-video obfuscation."""
     model.eval()
     correct = 0
     total = 0
     for s in range(0, Xte.shape[0], batch_size):
         x = Xte[s:s+batch_size].to(device, dtype=torch.float32)  # (B, T, d0)
         y = yte[s:s+batch_size].to(device)
-        xw = x @ W                    # (B, T, d)
-        xw = xw[:, perm_frames]       # Π₃: same frame permutation as training
-        logits = model(xw)
+        logits = model(x)
         logits = logits[:, inv_perm2]  # invert Π₂
         pred = logits.argmax(dim=1)
         correct += (pred == y).sum().item()
@@ -571,7 +684,7 @@ if __name__ == "__main__":
                     choices=["lstm", "transformer"],
                     help="temporal classifier architecture")
     ap.add_argument("--num_frames", type=int, default=250,
-                    help="frames per video (longer videos subsampled, shorter ones padded)")
+                    help="fallback frame count if filtering is skipped; otherwise overwritten by mean+2std")
 
     # Paper-style knobs
     ap.add_argument("--n", type=int, default=5050,
@@ -604,13 +717,36 @@ if __name__ == "__main__":
     device = get_device()
     c = 101
     print(f"device: {device}")
-    print(f"model: {args.model}, num_frames: {args.num_frames}")
+    print(f"model: {args.model}")
     print(f"UCF-101: {c} classes, split {args.split}")
 
-    # 1) Per-frame embeddings with ResNet-50
-    Xtr, ytr, Xte, yte = embed_ucf101_per_frame(
-        args.video_root, args.annot_root, args.split,
-        device, args.embed_bs, args.cache, num_frames=args.num_frames,
+    # Parse split annotations and choose a fixed clip length from the frame-count distribution.
+    _, train_list, test_list = parse_ucf101_split(args.annot_root, args.split)
+    print(f"UCF-101 split {args.split}: {len(train_list)} train, {len(test_list)} test")
+    frame_limit, frame_counts, plot_path = analyze_frame_counts(
+        args.video_root, train_list, test_list, args.split
+    )
+    train_list = filter_samples_by_frame_limit(train_list, frame_counts, frame_limit)
+    test_list = filter_samples_by_frame_limit(test_list, frame_counts, frame_limit)
+    args.num_frames = frame_limit
+    print(f"Using fixed clip length {args.num_frames} from mean + 2*std")
+    print(f"Filtered split: {len(train_list)} train, {len(test_list)} test")
+    print(f"Frame-count plot: {plot_path}")
+
+    cache_base = Path(args.cache)
+    clean_cache = str(cache_base)
+    obf_cache = str(cache_base.with_name(f"{cache_base.stem}_rawobf{cache_base.suffix}"))
+
+    # 1) Per-frame embeddings with ResNet-50 on clean clips
+    print("Extracting clean per-frame embeddings...")
+    Xtr, ytr = embed_ucf101_per_frame(
+        args.video_root, train_list, device, args.embed_bs, clean_cache,
+        num_frames=args.num_frames,
+    )
+    Xte, yte = embed_ucf101_per_frame(
+        args.video_root, test_list, device, args.embed_bs,
+        clean_cache.replace(cache_base.suffix, f"_test{cache_base.suffix}"),
+        num_frames=args.num_frames,
     )
     d0 = Xtr.shape[2]  # 2048
     if args.d is None:
@@ -618,8 +754,26 @@ if __name__ == "__main__":
     print(f"Train: {Xtr.shape[0]} videos × {Xtr.shape[1]} frames × {d0}d")
     print(f"Test:  {Xte.shape[0]} videos × {Xte.shape[1]} frames × {d0}d")
 
-    # 2) Subsample n points (balanced per class)
-    Xn, yn = stratified_subset(Xtr, ytr, n=args.n, c=c, seed=args.seed)
+    # 2) Per-frame embeddings with raw-video obfuscation applied first
+    print("Extracting obfuscated per-frame embeddings...")
+    Xtr_obf, ytr_obf = embed_ucf101_per_frame(
+        args.video_root, train_list, device, args.embed_bs, obf_cache,
+        num_frames=args.num_frames,
+        sigma=args.sigma,
+        obfuscate_before_embedding=True,
+        obf_seed=args.seed,
+    )
+    Xte_obf, yte_obf = embed_ucf101_per_frame(
+        args.video_root, test_list, device, args.embed_bs,
+        obf_cache.replace(cache_base.suffix, f"_test{cache_base.suffix}"),
+        num_frames=args.num_frames,
+        sigma=args.sigma,
+        obfuscate_before_embedding=True,
+        obf_seed=args.seed,
+    )
+
+    # 3) Subsample n points (balanced per class) from the obfuscated embedding set
+    Xn, yn = stratified_subset(Xtr_obf, ytr_obf, n=args.n, c=c, seed=args.seed)
     print(f"subset: X={Xn.shape}, y={yn.shape}")
 
     # Helper to build the selected temporal model
@@ -662,17 +816,17 @@ if __name__ == "__main__":
     ### Obfuscated model training
     print("\nTraining obfuscated model:")
 
-    # 3) Build mixed dataset using class-k-mixing (frame-by-frame averaging)
+    # 4) Build mixed dataset using class-k-mixing (frame-by-frame averaging)
     Xm, Ym = make_k_mixed_dataset(Xn, yn, c=c, m=args.m, k=args.k, seed=args.seed)
     print(f"mixed: Xm={Xm.shape}, Ym={Ym.shape}")
 
-    # 4) Obfuscate via Algorithm 1 transforms (per-frame projection)
-    Xt, Yt, W, perm2, inv_perm2, perm_frames = obfuscate_training(
-        Xm, Ym, d=args.d, sigma=args.sigma, seed=args.seed, device=device
+    # 5) Keep the row/label permutations after raw-video obfuscation + embedding
+    Xt, Yt, perm2, inv_perm2 = permute_training_labels(
+        Xm, Ym, seed=args.seed, device=device
     )
     print(f"obfuscated: Xt={Xt.shape}, Yt={Yt.shape}")
 
-    # 5) Train temporal model on transformed data
+    # 6) Train temporal model on transformed data
     model = make_model(args.d)
     opt = optim.Adam(model.parameters(), lr=args.lr)
 
@@ -692,12 +846,12 @@ if __name__ == "__main__":
             loss.backward()
             opt.step()
 
-        acc_obf = eval_model(model, Xte, yte, W, inv_perm2, perm_frames, device=device)
+        acc_obf = eval_model(model, Xte_obf, yte_obf, inv_perm2, device=device)
         print(f"Epoch {ep}: test acc = {acc_obf:.2f}%")
 
     print("\nFinal results:")
     final_baseline = eval_model_baseline(model_baseline, Xte, yte, device=device)
-    final_obf = eval_model(model, Xte, yte, W, inv_perm2, perm_frames, device=device)
+    final_obf = eval_model(model, Xte_obf, yte_obf, inv_perm2, device=device)
     print(f"Baseline (no obfuscation): {final_baseline:.2f}%")
     print(f"Obfuscated:                {final_obf:.2f}%")
     print(f"Accuracy gap:              {final_baseline - final_obf:.2f}%")
