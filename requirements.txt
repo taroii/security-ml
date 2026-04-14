@@ -2,3 +2,6 @@ ipykernel
 opencv-python
 numpy
 rarfile
+matplotlib
+scipy
+pandas

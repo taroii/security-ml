@@ -213,3 +213,4 @@ cifar10_resnet50_embed.pt
 ucf101_r3d18_embed.pt
 
 *.pt
+*.npz
