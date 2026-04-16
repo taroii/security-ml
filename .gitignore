@@ -214,3 +214,5 @@ ucf101_r3d18_embed.pt
 
 *.pt
 *.npz
+
+.DS_Store
