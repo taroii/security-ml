@@ -37,44 +37,88 @@ from main_video import (
 # Frame loading: grayscale, no embedding model
 # ----------------------------
 def load_video_frames_gray(
-    path: str,
+    path:       str,
     num_frames: int = 16,
-    size: int = 112,
+    size:       int = 112,
+    rng:        np.random.Generator = None,
 ) -> Tuple[np.ndarray, np.ndarray, int]:
     """
-    Load a video, sample num_frames uniformly, convert to grayscale.
+    Load a video, randomly sample num_frames without loading all frames
+    into memory. Uses cv2 seeking to read only the selected frames.
 
     Returns:
       frames:        (T, H*W) float32 in [0, 1]
-      frame_indices: (T,)     int array of sampled frame indices
+      frame_indices: (T,)     int array of sampled frame indices (sorted)
       total_frames:  total number of frames in the video
     """
+    if rng is None:
+        rng = np.random.default_rng()
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {path}")
 
-    all_frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    # get total frame count without reading all frames
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if total_frames <= 0:
+        # CAP_PROP_FRAME_COUNT unreliable for some codecs — fall back
+        # to counting frames sequentially (only for problematic videos)
+        frames_buf = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frames_buf.append(frame)
+        cap.release()
+        total_frames = len(frames_buf)
+        if total_frames == 0:
+            raise RuntimeError(f"No frames read from: {path}")
+        replace      = total_frames < num_frames
+        frame_indices = np.sort(
+            rng.choice(total_frames, size=num_frames, replace=replace)
+        ).astype(int)
+        sampled = [frames_buf[i] for i in frame_indices]
+    else:
+        cap.release()
+        replace       = total_frames < num_frames
+        frame_indices = np.sort(
+            rng.choice(total_frames, size=num_frames, replace=replace)
+        ).astype(int)
+
+        # re-open and seek to each selected frame index
+        cap    = cv2.VideoCapture(path)
+        sampled = []
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret:
+                # seek failed — fall back to nearest readable frame
+                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, idx - 1))
+                ret, frame = cap.read()
+            if ret:
+                sampled.append(frame)
+        cap.release()
+
+        if len(sampled) == 0:
+            raise RuntimeError(f"No frames read from: {path}")
+
+        # if some seeks failed, pad with last successful frame
+        while len(sampled) < num_frames:
+            sampled.append(sampled[-1])
+
+    # convert to grayscale and flatten
+    result = []
+    for frame in sampled:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.resize(gray, (size, size))
-        all_frames.append(gray)
-    cap.release()
+        result.append(gray)
 
-    if len(all_frames) == 0:
-        raise RuntimeError(f"No frames read from: {path}")
-
-    total_frames = len(all_frames)
-    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
-    sampled = np.stack([all_frames[i] for i in frame_indices], axis=0)  # (T, H, W)
-
-    T, H, W = sampled.shape
-    frames = sampled.reshape(T, H * W).astype(np.float32) / 255.0  # (T, d0)
+    stack   = np.stack(result, axis=0)                     # (T, H, W)
+    T, H, W = stack.shape
+    frames  = stack.reshape(T, H * W).astype(np.float32) / 255.0
 
     return frames, frame_indices, total_frames
-
 
 # ----------------------------
 # Build frame pool U from training videos
@@ -85,6 +129,7 @@ def build_frame_pool(
     cache_path: str,
     num_frames: int = 16,
     size: int = 112,
+    seed: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Load all training videos and extract individual grayscale frames.
@@ -113,11 +158,15 @@ def build_frame_pool(
     clip_ids_list = []
     clip_lengths_list = []
 
+    # per-clip rng for reproducible random frame sampling
+    pool_rng = np.random.default_rng(seed)
+
     for clip_id, (rel_path, label) in enumerate(train_list):
         video_path = os.path.join(video_root, rel_path)
         try:
+            clip_rng = np.random.default_rng(pool_rng.integers(1 << 62))
             frames, fidxs, total = load_video_frames_gray(
-                video_path, num_frames=num_frames, size=size
+                video_path, num_frames=num_frames, size=size, rng=clip_rng
             )
         except RuntimeError as e:
             print(f"  Skipping {rel_path}: {e}")
@@ -220,12 +269,12 @@ def compute_weighted_score(
     Half-integer weighted overlap between guessed and true frame indices.
 
       w = 1   if exact match  (distance == 0)
-      w = 1/2 if distance <= 0.1 * clip_length
+      w = 1/2 if distance <= 0.05 * clip_length
       w = 0   otherwise
 
     Returns total weighted score in [0, T].
     """
-    window = 0.1 * clip_length
+    window = 0.05 * clip_length
     total_weight = 0.0
     for g in guessed_indices:
         min_dist = np.abs(true_indices - g).min()
@@ -271,109 +320,105 @@ def run_attack(
     seed: int = 0,
 ) -> dict:
     """
-    Weighted membership inference attack (reformulated).
+    Weighted membership inference attack following Section 7.2 of
+    Xiao et al. (2024).
 
-    For each trial, uses the SAME Π, M, W for both H+ and H-,
-    swapping only the target video's frames. This cancels the
-    randomness from W and B, leaving a clean signal from the
-    presence/absence of the target frame.
+    For each target video, estimates the marginal log-likelihood of
+    the observed release o under two hypotheses:
 
-    Delta = log P(o | X+) - log P(o | X-)
-          = (||o - o-||² - ||o - o+||²) / (2σ)
+      H+: target video's true frames are in X
+      H-: target video's frames are replaced by same-class frames
+          from other videos
 
-    If mean(Delta) > 0 across trials: guess H+ (member).
+    Each hypothesis is simulated n_trials times with fresh independent
+    keys (Π, M, W, B), and the average log-likelihood is compared.
+    The adversary guesses H+ if mean ll+ > mean ll-.
+
+    This matches Eq. (13) of Xiao et al.:
+      P(X_hat = X0) = P(X = X0 | M(X) = o)
+    estimated via Monte Carlo averaging of the Gaussian likelihood
+      log P(o | X_sim, Π, M, W) = -||o - Π M X_sim W + B||² / (2σ)
     """
-    rng = np.random.default_rng(seed)
+    rng     = np.random.default_rng(seed)
     n_clips = clip_lengths.shape[0]
+
+    # select target videos
     target_vids = rng.choice(n_clips, size=n_targets, replace=False)
 
-    # build true observed release with fixed keys
+    # build true observed release o = T_X(X) with fixed keys
     print("Building true obfuscated release o = T_X(X)...")
     Xm_true = class_k_mix(U, labels, c, k, rng)
-    o = obfuscate(Xm_true, d, sigma, rng)
+    o       = obfuscate(Xm_true, d, sigma, rng)
     print(f"  o shape: {o.shape}")
 
-    # pre-compute row indices for every clip
+    # pre-compute row indices per clip to avoid repeated np.where
     clip_row_indices = [
         np.where(clip_ids == vid)[0]
         for vid in range(n_clips)
     ]
 
     weighted_scores = []
-    h_plus_wins = []
-    mean_deltas = []
+    h_plus_wins     = []
+    mean_deltas     = []
 
     for t_num, vid_idx in enumerate(target_vids):
 
-        vid_rows = clip_row_indices[vid_idx]
-        true_fidxs = frame_indices[vid_rows]
-        clip_len = clip_lengths[vid_idx]
-        true_label = labels[vid_rows][0]
+        vid_rows        = clip_row_indices[vid_idx]
+        true_fidxs      = frame_indices[vid_rows]
+        clip_len        = clip_lengths[vid_idx]
+        true_label      = labels[vid_rows][0]
 
-        # same-class frames from other videos for swapping
+        # pool of same-class frames from other videos for H- swapping
         same_class_mask = (labels == true_label) & (
             ~np.isin(np.arange(len(labels)), vid_rows)
         )
         same_class_idxs = np.where(same_class_mask)[0]
 
-        # cache true rows for restoration
+        # cache true rows so we can restore U after each H- trial
         true_rows_cache = U[vid_rows].copy()
 
-        delta_list = []
+        ll_plus_list  = []
+        ll_minus_list = []
 
         for trial in range(n_trials):
-            trial_rng = np.random.default_rng(
+
+            # --- H+ trial: true frames remain in U ---
+            rng_plus = np.random.default_rng(
                 seed * 10**6 + t_num * 10**3 + trial
             )
+            Xm_plus = class_k_mix(U, labels, c, k, rng_plus)
+            o_plus  = obfuscate(Xm_plus, d, sigma, rng_plus)
+            ll_plus_list.append(log_likelihood(o, o_plus, sigma))
 
-            # --- shared obfuscation keys for this trial ---
-            # mix X+ (true frames in place)
-            Xm_plus = class_k_mix(U, labels, c, k, trial_rng)
-
-            # derive X- by swapping target rows, using SAME trial_rng
-            # state — but we need the mix to use the same random choices
-            # for all other rows. We achieve this by:
-            #   1. computing Xm_plus with true frames
-            #   2. swapping target rows in U
-            #   3. reseeding trial_rng to same state and recomputing mix
-            alt_idxs = trial_rng.choice(
+            # --- H- trial: swap target rows, fresh independent keys ---
+            rng_minus       = np.random.default_rng(
+                seed * 10**6 + t_num * 10**3 + trial + 500000
+            )
+            alt_idxs        = rng_minus.choice(
                 same_class_idxs, size=num_frames, replace=True
             )
-            U[vid_rows] = U[alt_idxs]
+            U[vid_rows]     = U[alt_idxs]           # in-place swap
+            Xm_minus        = class_k_mix(U, labels, c, k, rng_minus)
+            o_minus         = obfuscate(Xm_minus, d, sigma, rng_minus)
+            U[vid_rows]     = true_rows_cache        # restore immediately
+            ll_minus_list.append(log_likelihood(o, o_minus, sigma))
 
-            # reseed to same state so mix uses identical random choices
-            trial_rng_minus = np.random.default_rng(
-                seed * 10**6 + t_num * 10**3 + trial
-            )
-            Xm_minus = class_k_mix(U, labels, c, k, trial_rng_minus)
-            U[vid_rows] = true_rows_cache  # restore immediately
+        mean_ll_plus  = float(np.mean(ll_plus_list))
+        mean_ll_minus = float(np.mean(ll_minus_list))
+        h_plus_win    = mean_ll_plus > mean_ll_minus
 
-            # shared W, perm, B — same seed for both
-            obf_rng = np.random.default_rng(
-                seed * 10**6 + t_num * 10**3 + trial + 500000
-            )
-            o_plus = obfuscate_fixed(Xm_plus, d, sigma, obf_rng)
-            obf_rng_reuse = np.random.default_rng(
-                seed * 10**6 + t_num * 10**3 + trial + 500000
-            )
-            o_minus = obfuscate_fixed(Xm_minus, d, sigma, obf_rng_reuse)
+        # delta as a normalised summary statistic for reporting
+        mean_delta = mean_ll_plus - mean_ll_minus
 
-            # delta: positive means o is closer to o+ than o-
-            diff_plus = float(np.sum((o - o_plus) ** 2))
-            diff_minus = float(np.sum((o - o_minus) ** 2))
-            delta = (diff_minus - diff_plus) / (2.0 * sigma)
-            delta_list.append(delta)
-
-        mean_delta = float(np.mean(delta_list))
-        h_plus_win = mean_delta > 0
-
-        # score
+        # score the adversary's guess
         fallback_rng = np.random.default_rng(seed * 10**6 + t_num)
         if h_plus_win:
             guessed_fidxs = true_fidxs
         else:
             guessed_fidxs = np.sort(
-                fallback_rng.choice(clip_len, size=num_frames, replace=False)
+                fallback_rng.choice(
+                    clip_len, size=num_frames, replace=False
+                )
             ).astype(int)
 
         w_score = compute_weighted_score(guessed_fidxs, true_fidxs, clip_len)
@@ -385,28 +430,46 @@ def run_attack(
             f"  [{t_num+1:3d}/{n_targets}] "
             f"clip={vid_idx:4d}  "
             f"H+={h_plus_win}  "
-            f"Δ={mean_delta:+.2f}  "
+            f"ll+={mean_ll_plus:.2e}  "
+            f"ll-={mean_ll_minus:.2e}  "
+            f"Δ={mean_delta:.2e}  "
             f"score={w_score:.1f}/{num_frames}"
         )
 
-    weighted_scores = np.array(weighted_scores, dtype=float)
-    h_plus_wins = np.array(h_plus_wins, dtype=bool)
-    mean_deltas = np.array(mean_deltas, dtype=float)
+    weighted_scores  = np.array(weighted_scores, dtype=float)
+    h_plus_wins      = np.array(h_plus_wins,     dtype=bool)
+    mean_deltas      = np.array(mean_deltas,      dtype=float)
     normalized_score = weighted_scores.mean() / num_frames
+
+    # also compute prior-only baseline score: what an adversary achieves
+    # by always guessing H+ (i.e. always guessing the true linspace frames)
+    # without looking at o at all — this is the prior success probability
+    prior_scores = np.array([
+        compute_weighted_score(
+            frame_indices[clip_row_indices[vid_idx]],
+            frame_indices[clip_row_indices[vid_idx]],
+            clip_lengths[vid_idx],
+        )
+        for vid_idx in target_vids
+    ], dtype=float)
+    prior_normalized = prior_scores.mean() / num_frames
 
     print(f"\n--- Attack Results (sigma={sigma}) ---")
     print(f"Mean weighted score : {weighted_scores.mean():.3f} / {num_frames}")
     print(f"Normalized score    : {normalized_score:.4f}")
+    print(f"Prior-only baseline : {prior_normalized:.4f}  "
+          f"(always guess H+, ignore o)")
     print(f"H+ win rate         : {h_plus_wins.mean():.3f}")
-    print(f"Mean delta          : {mean_deltas.mean():+.4f}")
+    print(f"Mean delta (ll+-ll-): {mean_deltas.mean():.4e}")
 
     return {
-        "sigma": sigma,
-        "weighted_scores": weighted_scores,
-        "normalized_score": normalized_score,
-        "h_plus_wins": h_plus_wins,
-        "mean_deltas": mean_deltas,
-        "target_vids": target_vids,
+        "sigma":              sigma,
+        "weighted_scores":    weighted_scores,
+        "normalized_score":   normalized_score,
+        "prior_normalized":   prior_normalized,
+        "h_plus_wins":        h_plus_wins,
+        "mean_deltas":        mean_deltas,
+        "target_vids":        target_vids,
     }
 
 
@@ -434,13 +497,13 @@ if __name__ == "__main__":
     D = 500
     K = 5
     N_TARGETS = 100
-    N_TRIALS = 100
+    N_TRIALS = 50
     SPLIT = 1
     SIGMAS = [0.01, 0.03, 0.05, 0.10]  # sweep noise levels
 
     VIDEO_ROOT = "./data/UCF-101"
     ANNOT_ROOT = "./data/ucfTrainTestlist"
-    CACHE_PATH = "./ucf101_frame_pool_gray.npz"
+    CACHE_PATH = "./ucf101_frame_pool_gray_random.npz"
 
     set_seed(SEED)
 
@@ -455,13 +518,14 @@ if __name__ == "__main__":
         cache_path=CACHE_PATH,
         num_frames=NUM_FRAMES,
         size=SIZE,
+        seed=SEED,
     )
     print(f"U shape: {U.shape}")
 
     # --- run attack across sigma values ---
     all_results = []
 
-    for sigma in SIGMAS:
+    for i, sigma in enumerate(SIGMAS):
         print(f"\n{'='*50}")
         print(f"Running attack: sigma={sigma}")
         print(f"{'='*50}")
@@ -479,7 +543,7 @@ if __name__ == "__main__":
             n_targets=N_TARGETS,
             n_trials=N_TRIALS,
             num_frames=NUM_FRAMES,
-            seed=SEED,
+            seed=SEED + i,
         )
         all_results.append(results)
 

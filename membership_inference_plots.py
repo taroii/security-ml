@@ -196,9 +196,9 @@ def plot_mean_delta(ax, df: pd.DataFrame):
 
     _style_ax(
         ax,
-        xlabel="Noise level $\\sigma$",
-        ylabel=r"Mean $\Delta$",
-        title=r"(c) Likelihood Ratio Signal $\Delta$ vs Noise",
+        xlabel=r"Noise level ($\sigma$)",
+        ylabel=r"Mean ($\Delta$)",
+        title=r"Likelihood Ratio Signal $\Delta$ vs Noise",
     )
     ax.legend(fontsize=10)
     ax.annotate(
@@ -325,32 +325,19 @@ if __name__ == "__main__":
 
     print("Loading results...")
     df, npz = load_results(
-        csv_path="attack_results.csv",
-        npz_path="attack_results_full.npz",
+        csv_path="attack_results_10_trials/attack_results.csv",
+        npz_path="attack_results_10_trials/attack_results_full.npz",
     )
 
     # print formatted table
     print_results_table(df, num_frames=NUM_FRAMES)
 
-    # combined figure
-    print("Generating combined figure...")
-    plot_all(
-        df=df,
-        num_frames=NUM_FRAMES,
-        save_path="fig_attack_results.png",
-    )
-
-    # individual figures for paper
-    print("Generating individual figures...")
-    plot_individual(
-        df=df,
-        num_frames=NUM_FRAMES,
-        prefix="fig_attack",
-    )
-
-    print("\nDone. Output files:")
-    print("  fig_attack_results.png       — combined 2x2 figure")
-    print("  fig_attack_normalized_score.png")
-    print("  fig_attack_h_plus_win_rate.png")
-    print("  fig_attack_mean_delta.png")
-    print("  fig_attack_score_dist.png")
+    # mean delta figure only
+    print("Generating mean delta figure...")
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    plot_mean_delta(ax, df)
+    plt.tight_layout()
+    save_path = "fig_attack_mean_delta.png"
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {save_path}")
