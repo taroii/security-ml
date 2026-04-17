@@ -232,7 +232,7 @@ def apply_mechanism(
 
     m, d0 = Xm.shape
     W = rng.standard_normal((d0, d)).astype(np.float32) / np.sqrt(d)
-    B = rng.standard_normal((m, d)).astype(np.float32) * np.sqrt(sigma)
+    B = rng.standard_normal((m, d)).astype(np.float32) * sigma
     perm = rng.permutation(m)
     return Xm[perm] @ W + B
 
@@ -245,6 +245,7 @@ def compute_weighted_score(
     true_indices: np.ndarray,
     clip_length: int,
     weight_rule: str = "half",
+    window_frac: float = 0.01,
 ) -> float:
     """
     Weighted overlap between guessed and true frame indices.
@@ -253,7 +254,7 @@ def compute_weighted_score(
       "half"    : w=1 if exact, w=1/2 if dist <= 0.05*clip_length, else 0
       "integer" : w=1 if exact, else 0  (binary baseline)
     """
-    window = 0.05 * clip_length
+    window = window_frac * clip_length
     total = 0.0
     for g in guessed_indices:
         min_dist = np.abs(true_indices - g).min()
@@ -269,6 +270,7 @@ def lemma3_random_baseline(
     clip_length: int,
     N_total: int,
     weight_rule: str = "half",
+    window_frac: float = 0.01,
 ) -> float:
     """
     Analytical random baseline per Lemma 3 / Lemma 2 (integer case),
@@ -285,7 +287,7 @@ def lemma3_random_baseline(
     if weight_rule == "integer":
         return float(num_frames) / float(N_total)
 
-    window = 0.05 * clip_length
+    window = window_frac * clip_length
     half_per_true = min(2.0 * window, max(0, clip_length - 1))
     m_half = min(num_frames * half_per_true, max(0, clip_length - num_frames))
     return float((num_frames + m_half / 2.0) / float(N_total))
@@ -301,7 +303,7 @@ def log_likelihood(
 ) -> float:
     """log P(o | X_sim) ~ -||o - o_sim||^2 / (2*sigma)  (constant dropped)."""
     diff = o - o_sim
-    return -float(np.sum(diff ** 2)) / (2.0 * sigma)
+    return -float(np.sum(diff ** 2)) / (2.0 * sigma**2 )
 
 
 # ----------------------------
