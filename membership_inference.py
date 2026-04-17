@@ -33,7 +33,9 @@ import pandas as pd
 # reuse utilities from main pipeline
 from main_video import (
     set_seed,
+    get_device,
     parse_ucf101_split,
+    download_ucf101,        # add this
 )
 
 
@@ -558,11 +560,13 @@ if __name__ == "__main__":
     SPLIT = 1
     SIGMAS = [0.01, 0.05, 0.10, 0.50]
 
-    VIDEO_ROOT = "./data/UCF-101"
-    ANNOT_ROOT = "./data/ucfTrainTestlist"
-    POOL_CACHE = "./ucf101_frame_pool_gray_random.npz"
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    VIDEO_ROOT = os.path.join(SCRIPT_DIR, "data", "UCF-101")
+    ANNOT_ROOT = os.path.join(SCRIPT_DIR, "data", "ucfTrainTestlist")
+    CACHE_PATH = os.path.join(SCRIPT_DIR, "ucf101_frame_pool_gray_random.npz")
 
-    os.makedirs(args.results_dir, exist_ok=True)
+    data_root = os.path.join(SCRIPT_DIR, "data")
+    download_ucf101(data_root, VIDEO_ROOT, ANNOT_ROOT)   # no-op if already present
     set_seed(SEED)
 
     _, train_list, _ = parse_ucf101_split(ANNOT_ROOT, SPLIT)
@@ -573,7 +577,7 @@ if __name__ == "__main__":
     U, labels, frame_indices, clip_ids, clip_lengths = build_frame_pool(
         video_root=VIDEO_ROOT,
         train_list=train_list,
-        cache_path=POOL_CACHE,
+        cache_path=CACHE_PATH,
         num_frames=NUM_FRAMES,
         size=SIZE,
         seed=SEED,
