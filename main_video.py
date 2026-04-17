@@ -1,3 +1,25 @@
+"""
+main_video.py
+
+Train a UCF-101 action classifier under learnable obfuscation, then
+report test accuracy. Used to populate the utility axis of Figure 4
+(privacy-utility Pareto frontier).
+
+Usage (one process per (k, sigma) cell, parallelize across cells):
+    python main_video.py --k 0 --sigma 0.01
+    python main_video.py --k 0 --sigma 0.05
+    ...
+    python main_video.py --k 5 --sigma 0.50
+
+The first invocation also trains and caches the no-obfuscation baseline
+(in accuracy_results/baseline.csv); subsequent invocations skip the
+baseline and only train the obfuscated model.
+
+Each (k, sigma) cell writes accuracy_results/acc_k{k}_sigma{sigma}.csv.
+Use merge_accuracy.py to combine into a single long-format CSV.
+"""
+
+import argparse
 import os
 import random
 import shutil
@@ -6,10 +28,11 @@ import subprocess
 import sys
 import urllib.request
 import zipfile
-from typing import Tuple, List
+from typing import List, Tuple
 
 import cv2
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -35,17 +58,16 @@ class TransformerClassifier(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.fc = nn.Linear(input_dim, num_classes)
 
-    def forward(self, x):  # (B, T, d)
+    def forward(self, x):
         B = x.shape[0]
         cls = self.cls_token.expand(B, -1, -1)
-        x = torch.cat([cls, x], dim=1)              # (B, T+1, d)
+        x = torch.cat([cls, x], dim=1)
         x = x + self.pos_embed[:, :x.shape[1]]
         x = self.encoder(x)
-        return self.fc(x[:, 0])                      # CLS token
+        return self.fc(x[:, 0])
 
 
 def soft_ce_loss(logits: torch.Tensor, soft_targets: torch.Tensor) -> torch.Tensor:
-    """Cross-entropy with soft targets (rows sum to 1)."""
     logp = F.log_softmax(logits, dim=1)
     return -(soft_targets * logp).sum(dim=1).mean()
 
@@ -75,7 +97,6 @@ UCF101_ANNOT_URL = "https://www.crcv.ucf.edu/data/UCF101/UCF101TrainTestSplits-R
 
 
 def _download_with_progress(url: str, dest: str):
-    """Download a file with a simple progress indicator."""
     print(f"Downloading {url}")
     print(f"  -> {dest}")
 
@@ -95,13 +116,11 @@ def _download_with_progress(url: str, dest: str):
     ctx.verify_mode = ssl.CERT_NONE
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
     urllib.request.install_opener(opener)
-
     urllib.request.urlretrieve(url, dest, reporthook=reporthook)
     print()
 
 
 def _extract_rar(rar_path: str, dest_dir: str):
-    """Extract a RAR archive using rarfile, 7z, or unrar."""
     try:
         import rarfile
         print(f"Extracting {rar_path} with rarfile...")
@@ -142,7 +161,6 @@ def _extract_rar(rar_path: str, dest_dir: str):
 
 
 def download_ucf101(data_root: str, video_root: str, annot_root: str):
-    """Download and extract UCF-101 videos and annotations if not present."""
     os.makedirs(data_root, exist_ok=True)
 
     if not os.path.isdir(annot_root):
@@ -172,11 +190,6 @@ def download_ucf101(data_root: str, video_root: str, annot_root: str):
 # Video loading
 # ----------------------------
 def load_video_frames(path: str, num_frames: int = 16, size: int = 224) -> torch.Tensor:
-    """
-    Read a video file with OpenCV.
-    Uniformly subsample to `num_frames` frames, resize to (size, size).
-    Returns a float tensor of shape (3, T, H, W) in [0, 1].
-    """
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {path}")
@@ -198,9 +211,9 @@ def load_video_frames(path: str, num_frames: int = 16, size: int = 224) -> torch
     indices = np.linspace(0, total - 1, num_frames, dtype=int)
     frames = [frames[i] for i in indices]
 
-    clip = np.stack(frames, axis=0)                  # (T, H, W, 3)
-    clip = torch.from_numpy(clip).float() / 255.0    # (T, H, W, 3)
-    clip = clip.permute(3, 0, 1, 2)                  # (3, T, H, W)
+    clip = np.stack(frames, axis=0)
+    clip = torch.from_numpy(clip).float() / 255.0
+    clip = clip.permute(3, 0, 1, 2)
     return clip
 
 
@@ -210,13 +223,6 @@ def load_video_frames(path: str, num_frames: int = 16, size: int = 224) -> torch
 def parse_ucf101_split(
     annot_root: str, split: int = 1
 ) -> Tuple[dict, List[Tuple[str, int]], List[Tuple[str, int]]]:
-    """
-    Parse UCF-101 split files.
-    Returns:
-      class_to_idx: dict mapping class name -> 0-based index
-      train_list: list of (relative_path, class_idx) for training
-      test_list: list of (relative_path, class_idx) for testing
-    """
     class_ind_path = os.path.join(annot_root, "classInd.txt")
     class_to_idx = {}
     with open(class_ind_path, "r") as f:
@@ -253,13 +259,7 @@ def parse_ucf101_split(
 # UCF-101 Dataset
 # ----------------------------
 class UCF101Dataset(Dataset):
-    def __init__(
-        self,
-        video_root: str,
-        samples: List[Tuple[str, int]],
-        num_frames: int = 16,
-        size: int = 224,
-    ):
+    def __init__(self, video_root, samples, num_frames=16, size=224):
         self.video_root = video_root
         self.samples = samples
         self.num_frames = num_frames
@@ -287,12 +287,6 @@ def embed_dataset(
     cache_path: str,
     num_frames: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Embed each frame of each UCF-101 video independently with ResNet-18.
-    Returns:
-      X: (N, T, 512) float32
-      y: (N,) int64
-    """
     if os.path.exists(cache_path):
         obj = torch.load(cache_path, map_location="cpu")
         print(f"Using cached embeddings from {cache_path}\n")
@@ -324,12 +318,11 @@ def embed_dataset(
     total_batches = len(loader)
     for i, (clips, y) in enumerate(loader):
         B, C, T, H, W = clips.shape
-        # Reshape to per-frame: (B*T, 3, H, W)
         frames = clips.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
         frames = frames.to(device)
         frames = (frames - img_mean) / img_std
-        f = model(frames)                           # (B*T, 512)
-        f = f.float().view(B, T, -1)               # (B, T, 512)
+        f = model(frames)
+        f = f.float().view(B, T, -1)
         f = f / (f.norm(dim=-1, keepdim=True) + 1e-12)
         feats.append(f.cpu())
         labs.append(y.cpu())
@@ -347,8 +340,7 @@ def embed_dataset(
 # ----------------------------
 # Dataset-agnostic pipeline
 # ----------------------------
-def stratified_subset(X: torch.Tensor, y: torch.Tensor, n: int, c: int, seed: int):
-    """Pick n points with n/c per class (assumes divisible)."""
+def stratified_subset(X, y, n, c, seed):
     assert n % c == 0, "n must be divisible by number of classes"
     n0 = n // c
     g = torch.Generator().manual_seed(seed)
@@ -357,8 +349,7 @@ def stratified_subset(X: torch.Tensor, y: torch.Tensor, n: int, c: int, seed: in
         cls_idx = torch.where(y == cls)[0]
         if len(cls_idx) < n0:
             raise ValueError(
-                f"Class {cls} has only {len(cls_idx)} samples, need {n0}. "
-                f"Reduce n or check the dataset."
+                f"Class {cls} has only {len(cls_idx)} samples, need {n0}."
             )
         perm = cls_idx[torch.randperm(len(cls_idx), generator=g)]
         idxs.append(perm[:n0])
@@ -366,15 +357,9 @@ def stratified_subset(X: torch.Tensor, y: torch.Tensor, n: int, c: int, seed: in
     return X[idx], y[idx]
 
 
-def make_k_mixed_dataset(
-    X: torch.Tensor, y: torch.Tensor, c: int, m: int, k: int, seed: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Class-k-mixing on frame sequences.
-    X: (N, T, d0) -- each sample is a sequence of frame embeddings.
-    Frame-by-frame averaging preserves temporal structure.
-    Returns: Xm (m, T, d0), Ym (m, c)
-    """
+def make_k_mixed_dataset(X, y, c, m, k, seed):
+    """k>=1 mixing on frame sequences. Output shape (m, T, d0)."""
+    assert k >= 1, "make_k_mixed_dataset requires k>=1; k=0 handled in main"
     assert m % (c * c) == 0, "m must be divisible by c^2"
     m0 = m // (c * c)
 
@@ -394,7 +379,7 @@ def make_k_mixed_dataset(
                 idx_j = cls_to_idx[j][torch.randint(0, len(cls_to_idx[j]), (k,), generator=g)]
                 mix = torch.cat([idx_i, idx_j], dim=0)
 
-                Xm[t] = X[mix].mean(dim=0)  # (T, d0) frame-by-frame average
+                Xm[t] = X[mix].mean(dim=0)
 
                 if i == j:
                     Ym[t, i] = 1.0
@@ -407,26 +392,20 @@ def make_k_mixed_dataset(
     return Xm, Ym
 
 
-def obfuscate_training(
-    Xm: torch.Tensor,
-    Ym: torch.Tensor,
-    sigma: float,
-    seed: int,
-    device: torch.device,
-):
-    """
-    Algorithm 1 (W = embedding model, already applied):
-      T_X(X) = Pi1(X) + B
-      T_Y(Y) = Pi1(Y Pi2)
-    M (k-mixing) is already baked into Xm, Ym.
-    W (ResNet-18) is already applied (Xm contains embeddings).
-    Remaining transforms: Pi1 (sample perm), Pi2 (label perm), B (noise).
-    """
+def make_no_mix_dataset(X, y, c):
+    """k=0: pass through raw embeddings, expand y to one-hot."""
+    n = X.shape[0]
+    Ym = torch.zeros((n, c), dtype=X.dtype)
+    Ym[torch.arange(n), y] = 1.0
+    return X.clone(), Ym
+
+
+def obfuscate_training(Xm, Ym, sigma, seed, device):
+    """Apply Pi1, Pi2, B (W = ResNet-18 already applied)."""
     m = Xm.shape[0]
     g = torch.Generator(device="cpu").manual_seed(seed)
 
     perm1 = torch.randperm(m, generator=g)
-
     perm2 = torch.randperm(Ym.shape[1], generator=g)
     inv_perm2 = torch.empty_like(perm2)
     inv_perm2[perm2] = torch.arange(len(perm2))
@@ -449,7 +428,6 @@ def obfuscate_training(
 
 @torch.no_grad()
 def eval_model(model, Xte, yte, inv_perm2, device, batch_size=64):
-    """Evaluate obfuscated model (inverts label permutation Pi2)."""
     model.eval()
     correct = 0
     total = 0
@@ -466,7 +444,6 @@ def eval_model(model, Xte, yte, inv_perm2, device, batch_size=64):
 
 @torch.no_grad()
 def eval_model_baseline(model, Xte, yte, device, batch_size=64):
-    """Evaluate non-obfuscated baseline model."""
     model.eval()
     correct = 0
     total = 0
@@ -481,16 +458,105 @@ def eval_model_baseline(model, Xte, yte, device, batch_size=64):
 
 
 # ----------------------------
+# Training routines
+# ----------------------------
+def train_baseline(Xn, yn, Xte, yte, d0, T, c, device,
+                   epochs, lr, train_bs):
+    """Train no-obfuscation baseline. Returns final test accuracy."""
+    print("\nTraining baseline model (no obfuscation):")
+    model = TransformerClassifier(input_dim=d0, num_classes=c, num_frames=T).to(device)
+    opt = optim.Adam(model.parameters(), lr=lr)
+
+    Xn_dev = Xn.to(device, dtype=torch.float32)
+    yn_dev = yn.to(device)
+    n_train = Xn.shape[0]
+
+    for ep in range(epochs):
+        model.train()
+        perm = torch.randperm(n_train, device=device)
+        Xn_ep = Xn_dev[perm]
+        yn_ep = yn_dev[perm]
+
+        for s in range(0, n_train, train_bs):
+            xb = Xn_ep[s:s+train_bs]
+            yb = yn_ep[s:s+train_bs]
+            opt.zero_grad()
+            logits = model(xb)
+            loss = F.cross_entropy(logits, yb)
+            loss.backward()
+            opt.step()
+
+        if (ep + 1) % 10 == 0 or ep == epochs - 1:
+            acc = eval_model_baseline(model, Xte, yte, device=device)
+            print(f"  Epoch {ep+1}: test acc = {acc:.2f}%")
+
+    return eval_model_baseline(model, Xte, yte, device=device)
+
+
+def train_obfuscated(Xn, yn, Xte, yte, d0, T, c, k, sigma, m_mixed,
+                     device, epochs, lr, train_bs, seed):
+    """Train obfuscated model at given (k, sigma). Returns final test acc."""
+    print(f"\nTraining obfuscated model (k={k}, sigma={sigma}):")
+
+    if k >= 1:
+        Xm, Ym = make_k_mixed_dataset(Xn, yn, c=c, m=m_mixed, k=k, seed=seed)
+    else:
+        Xm, Ym = make_no_mix_dataset(Xn, yn, c=c)
+    print(f"  Pre-noise data: Xm={tuple(Xm.shape)}, Ym={tuple(Ym.shape)}")
+
+    Xt, Yt, perm2, inv_perm2 = obfuscate_training(
+        Xm, Ym, sigma=sigma, seed=seed, device=device
+    )
+    print(f"  Obfuscated:     Xt={tuple(Xt.shape)}, Yt={tuple(Yt.shape)}")
+
+    model = TransformerClassifier(input_dim=d0, num_classes=c, num_frames=T).to(device)
+    opt = optim.Adam(model.parameters(), lr=lr)
+
+    m_total = Xt.shape[0]
+    for ep in range(epochs):
+        model.train()
+        perm = torch.randperm(m_total, device=device)
+        Xt_ep = Xt[perm]
+        Yt_ep = Yt[perm]
+
+        for s in range(0, m_total, train_bs):
+            xb = Xt_ep[s:s+train_bs]
+            yb = Yt_ep[s:s+train_bs]
+            opt.zero_grad()
+            logits = model(xb)
+            loss = soft_ce_loss(logits, yb)
+            loss.backward()
+            opt.step()
+
+        if (ep + 1) % 10 == 0 or ep == epochs - 1:
+            acc = eval_model(model, Xte, yte, inv_perm2, device=device)
+            print(f"  Epoch {ep+1}: test acc = {acc:.2f}%")
+
+    return eval_model(model, Xte, yte, inv_perm2, device=device)
+
+
+# ----------------------------
 # Main
 # ----------------------------
 if __name__ == "__main__":
-    SEED = 42
-    EPOCHS = 50
-    LR = 1e-3
-    N = 5050       # training subset size (50 per class * 101 classes)
-    M_MIXED = 10201  # number of mixed samples (c^2 = 101^2)
-    K = 5          # mix number
-    SIGMA = 0.03
+    parser = argparse.ArgumentParser(
+        description="Train UCF-101 classifier under obfuscation; report accuracy."
+    )
+    parser.add_argument("--k", type=int, required=True, choices=[0, 1, 5],
+                        help="Mixing parameter")
+    parser.add_argument("--sigma", type=float, required=True,
+                        help="Noise standard deviation")
+    parser.add_argument("--results-dir", type=str, default="./accuracy_results",
+                        help="Output directory")
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--n", type=int, default=5050,
+                        help="Training subset size (50 per class * 101 classes)")
+    parser.add_argument("--m-mixed", type=int, default=10201,
+                        help="Number of mixed samples (used only for k>=1)")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
     EMBED_BS = 16
     TRAIN_BS = 64
     SPLIT = 1
@@ -499,99 +565,81 @@ if __name__ == "__main__":
     CACHE_TRAIN = "./ucf101_resnet18_perframe_train.pt"
     CACHE_TEST = "./ucf101_resnet18_perframe_test.pt"
 
+    os.makedirs(args.results_dir, exist_ok=True)
+
+    out_path = os.path.join(
+        args.results_dir, f"acc_k{args.k}_sigma{args.sigma:.4f}.csv"
+    )
+    if os.path.exists(out_path):
+        print(f"[skip] {out_path} already exists")
+        sys.exit(0)
+
     data_root = os.path.dirname(VIDEO_ROOT)
     download_ucf101(data_root, VIDEO_ROOT, ANNOT_ROOT)
 
-    set_seed(SEED)
+    set_seed(args.seed)
     device = get_device()
     c = 101
     print(f"device: {device}")
     print(f"UCF-101: {c} classes, split {SPLIT}")
+    print(f"Cell: k={args.k}, sigma={args.sigma}")
 
     _, train_list, test_list = parse_ucf101_split(ANNOT_ROOT, SPLIT)
     print(f"UCF-101 split {SPLIT}: {len(train_list)} train, {len(test_list)} test")
 
-    # 1) Embed all clips with ResNet-18 per-frame
     print("\nEmbedding training clips...")
     Xtr, ytr = embed_dataset(VIDEO_ROOT, train_list, device, EMBED_BS, CACHE_TRAIN)
     print("\nEmbedding test clips...")
     Xte, yte = embed_dataset(VIDEO_ROOT, test_list, device, EMBED_BS, CACHE_TEST)
 
-    d0 = Xtr.shape[2]  # 512
-    T = Xtr.shape[1]   # 16
+    d0 = Xtr.shape[2]
+    T = Xtr.shape[1]
     print(f"Train: {Xtr.shape[0]} clips x {T} frames x {d0}d")
     print(f"Test:  {Xte.shape[0]} clips x {T} frames x {d0}d")
 
-    # 2) Stratified subset
-    Xn, yn = stratified_subset(Xtr, ytr, n=N, c=c, seed=SEED)
+    Xn, yn = stratified_subset(Xtr, ytr, n=args.n, c=c, seed=args.seed)
     print(f"Subset: {Xn.shape}")
 
-    # --- Baseline ---
-    print("\nTraining baseline model (no obfuscation):")
-    model_baseline = TransformerClassifier(input_dim=d0, num_classes=c, num_frames=T).to(device)
-    opt_baseline = optim.Adam(model_baseline.parameters(), lr=LR)
+    # --- Baseline (cached, runs once across all cells) ---
+    baseline_path = os.path.join(args.results_dir, "baseline.csv")
+    if os.path.exists(baseline_path):
+        baseline_df = pd.read_csv(baseline_path)
+        baseline_acc = float(baseline_df["accuracy"].iloc[0])
+        print(f"\nLoaded cached baseline accuracy: {baseline_acc:.2f}%")
+    else:
+        baseline_acc = train_baseline(
+            Xn, yn, Xte, yte, d0, T, c, device,
+            epochs=args.epochs, lr=args.lr, train_bs=TRAIN_BS,
+        )
+        pd.DataFrame([{
+            "accuracy": baseline_acc,
+            "n": args.n,
+            "epochs": args.epochs,
+            "seed": args.seed,
+        }]).to_csv(baseline_path, index=False, float_format="%.4f")
+        print(f"Cached baseline accuracy: {baseline_acc:.2f}% -> {baseline_path}")
 
-    Xn_dev = Xn.to(device, dtype=torch.float32)
-    yn_dev = yn.to(device)
-    n_train = Xn.shape[0]
-
-    for ep in range(EPOCHS):
-        model_baseline.train()
-        perm = torch.randperm(n_train, device=device)
-        Xn_ep = Xn_dev[perm]
-        yn_ep = yn_dev[perm]
-
-        for s in range(0, n_train, TRAIN_BS):
-            xb = Xn_ep[s:s+TRAIN_BS]
-            yb = yn_ep[s:s+TRAIN_BS]
-            opt_baseline.zero_grad()
-            logits = model_baseline(xb)
-            loss = F.cross_entropy(logits, yb)
-            loss.backward()
-            opt_baseline.step()
-
-        acc_baseline = eval_model_baseline(model_baseline, Xte, yte, device=device)
-        print(f"Epoch {ep}: test acc = {acc_baseline:.2f}%")
-
-    # --- Obfuscated ---
-    print("\nTraining obfuscated model:")
-
-    # 3) k-mix frame-sequence embeddings
-    Xm, Ym = make_k_mixed_dataset(Xn, yn, c=c, m=M_MIXED, k=K, seed=SEED)
-    print(f"Mixed: Xm={Xm.shape}, Ym={Ym.shape}")
-
-    # 4) Apply Pi1, B, Pi2 (Algorithm 1; W = ResNet-18 already applied)
-    Xt, Yt, perm2, inv_perm2 = obfuscate_training(
-        Xm, Ym, sigma=SIGMA, seed=SEED, device=device
+    # --- Obfuscated for this (k, sigma) ---
+    obf_acc = train_obfuscated(
+        Xn, yn, Xte, yte, d0, T, c,
+        k=args.k, sigma=args.sigma, m_mixed=args.m_mixed,
+        device=device, epochs=args.epochs, lr=args.lr,
+        train_bs=TRAIN_BS, seed=args.seed,
     )
-    print(f"Obfuscated: Xt={Xt.shape}, Yt={Yt.shape}")
-
-    # 5) Train Transformer on obfuscated data
-    model = TransformerClassifier(input_dim=d0, num_classes=c, num_frames=T).to(device)
-    opt = optim.Adam(model.parameters(), lr=LR)
-
-    m_total = Xt.shape[0]
-    for ep in range(EPOCHS):
-        model.train()
-        perm = torch.randperm(m_total, device=device)
-        Xt_ep = Xt[perm]
-        Yt_ep = Yt[perm]
-
-        for s in range(0, m_total, TRAIN_BS):
-            xb = Xt_ep[s:s+TRAIN_BS]
-            yb = Yt_ep[s:s+TRAIN_BS]
-            opt.zero_grad()
-            logits = model(xb)
-            loss = soft_ce_loss(logits, yb)
-            loss.backward()
-            opt.step()
-
-        acc_obf = eval_model(model, Xte, yte, inv_perm2, device=device)
-        print(f"Epoch {ep}: test acc = {acc_obf:.2f}%")
 
     print("\nFinal results:")
-    final_baseline = eval_model_baseline(model_baseline, Xte, yte, device=device)
-    final_obf = eval_model(model, Xte, yte, inv_perm2, device=device)
-    print(f"Baseline (no obfuscation): {final_baseline:.2f}%")
-    print(f"Obfuscated:                {final_obf:.2f}%")
-    print(f"Accuracy gap:              {final_baseline - final_obf:.2f}%")
+    print(f"  Baseline (no obfuscation): {baseline_acc:.2f}%")
+    print(f"  Obfuscated (k={args.k}, sigma={args.sigma}): {obf_acc:.2f}%")
+    print(f"  Accuracy gap:              {baseline_acc - obf_acc:.2f}%")
+
+    pd.DataFrame([{
+        "k": args.k,
+        "sigma": args.sigma,
+        "accuracy_baseline": baseline_acc,
+        "accuracy_obfuscated": obf_acc,
+        "accuracy_gap": baseline_acc - obf_acc,
+        "n": args.n,
+        "epochs": args.epochs,
+        "seed": args.seed,
+    }]).to_csv(out_path, index=False, float_format="%.4f")
+    print(f"Wrote {out_path}")
