@@ -117,15 +117,15 @@ def plot_prior_success(
     ax.step(j_int[j_int <= zoom],
             prior_int[j_int <= zoom],
             where="post", color="steelblue", linewidth=2.0,
-            label="Integer weights (exact match)")
+            label="Integer weights")
     ax.step(j_half[j_half <= zoom],
             prior_half[j_half <= zoom],
             where="post", color="tomato", linewidth=2.0, linestyle="--",
             label="Half-integer weights")
-    ax.set_xlabel("Threshold $j$", fontsize=13)
-    ax.set_ylabel(r"$1 - \delta_0^{\geq j}$  (prior success prob.)",
+    ax.set_xlabel("Threshold ($j$)", fontsize=13)
+    ax.set_ylabel(r"Prior success probability ($1 - \delta_0^{\geq j}$)",
                   fontsize=13)
-    ax.set_title("Prior Success Probability vs Threshold", fontsize=13)
+    # ax.set_title("Prior Success Probability vs Threshold", fontsize=13)
     ax.legend(fontsize=11)
     ax.set_xlim(0, zoom)
     ax.set_ylim(0, 1.02)
@@ -137,11 +137,11 @@ def plot_prior_success(
         bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
     )
 
-    plt.suptitle(
-        "Lemma 3: Half-Integer Weights Increase Adversary Prior Success\n"
-        r"(larger $1-\delta_0^{\geq j}$ $\Rightarrow$ harder to protect privacy)",
-        fontsize=13, fontweight="bold", y=1.02,
-    )
+    # plt.suptitle(
+    #     "Lemma 3: Half-Integer Weights Increase Adversary Prior Success\n"
+    #     r"(larger $1-\delta_0^{\geq j}$ $\Rightarrow$ harder to protect privacy)",
+    #     fontsize=13, fontweight="bold", y=1.02,
+    # )
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()

@@ -7,16 +7,11 @@ Two-panel figure showing membership inference attack robustness vs noise
 level (sigma), swept over mixing parameter k:
 
   Panel (a): H+ win rate vs sigma, one curve per k. Reference line at 0.5
-             (chance). Demonstrates that the likelihood-ratio test
-             succeeds at low sigma when mixing is weak (k=0) and is
-             neutralized as k grows.
+             (chance).
 
   Panel (b): Normalized weighted score (half-integer rule) vs sigma, one
              curve per k. Two reference lines: analytical Lemma-3 random
-             baseline (lower bound on adversary success) and always-
-             guess-H+ baseline (the prior advantage from linspace
-             sampling structure). The meaningful adversary advantage is
-             the gap above the always-H+ line.
+             baseline and always-guess-H+ baseline.
 
 Reads merged_results.csv produced by merge_results.py.
 Writes fig2_mia_robustness.png.
@@ -42,7 +37,7 @@ K_STYLE = {
 def _style_ax(ax, xlabel, ylabel, title):
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
-    ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.set_title(title, fontsize=12)
     ax.grid(True, alpha=0.3)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -82,16 +77,11 @@ def plot_normalized_score(ax, df: pd.DataFrame):
     """
     Panel (b): Normalized weighted score (half) vs sigma, one curve per k.
     Reference lines: Lemma-3 random baseline and always-H+ baseline.
-
-    Both baselines are averaged over the (k, sigma) cells, since they
-    depend only on the per-clip universe partition (not on the attack).
-    They are essentially constant across cells.
     """
     for k in sorted(df["k"].unique()):
         sub = df[df["k"] == k].sort_values("sigma")
         color, marker, ls = K_STYLE.get(k, ("gray", "o", "-"))
 
-        # error bars: std of per-target weighted score / sqrt(n_targets)
         n_t = sub["n_targets"].iloc[0]
         se = sub["score_half_std"] / np.sqrt(n_t)
 
@@ -103,7 +93,6 @@ def plot_normalized_score(ax, df: pd.DataFrame):
             label=f"$k = {k}$",
         )
 
-    # reference lines (averaged across all cells; near-constant in practice)
     rand_half = df["random_baseline_half"].mean()
     always_h_plus = df["always_h_plus_half"].mean()
 
@@ -132,11 +121,6 @@ def make_figure(df: pd.DataFrame, save_path: str):
     plot_h_plus_win_rate(axes[0], df)
     plot_normalized_score(axes[1], df)
 
-    fig.suptitle(
-        "Figure 2: Membership Inference Robustness vs Noise Level "
-        "(swept over mixing parameter $k$)",
-        fontsize=13, fontweight="bold", y=1.02,
-    )
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()

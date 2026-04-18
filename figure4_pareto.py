@@ -3,17 +3,22 @@ figure4_pareto.py
 
 Figure 4 of "Learnable Obfuscation for Temporally Related Video Data".
 
-Privacy-utility Pareto frontier. For each (k, sigma) cell:
+Privacy-utility scatter. For each (k, sigma) cell:
   x-axis = test accuracy of obfuscated classifier (utility)
   y-axis = 1 - normalized adversary score (privacy; larger = more private)
 
-One curve per k, connecting sigma values in increasing order. Each point
-labeled by sigma. Baseline accuracy shown as a vertical reference line
-(the utility ceiling).
+Encoding:
+  color + linestyle -> k (mixing intensity)
+  marker size       -> sigma (noise level, small = low sigma)
 
-Joins merged_accuracy.csv (from main_video.py + merge_accuracy.py) with
-merged_results.csv (from membership_inference.py + merge_results.py)
-on (k, sigma).
+Two legends (one for k, one for sigma) are placed outside the plot area
+on the right to keep the data region uncluttered.
+
+Reference lines:
+  vertical dotted = no-obfuscation baseline accuracy
+  horizontal dashed = always-H+ privacy floor
+
+Joins merged_accuracy.csv with merged_results.csv on (k, sigma).
 """
 
 import argparse
@@ -23,6 +28,7 @@ import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 
 K_STYLE = {
@@ -30,6 +36,12 @@ K_STYLE = {
     1: ("#ff7f0e", "s", "--"),
     5: ("#1f77b4", "^", "-."),
 }
+
+# map sigma -> marker size (points).  Small sigma -> small marker.
+def sigma_to_size(sigma: float) -> float:
+    # linear map; tune endpoints here if needed
+    size_map = {0.01: 6, 0.05: 10, 0.10: 14, 0.50: 20}
+    return size_map.get(round(sigma, 2), 10)
 
 
 def load_and_join(accuracy_path: str, mia_path: str) -> pd.DataFrame:
@@ -45,7 +57,6 @@ def load_and_join(accuracy_path: str, mia_path: str) -> pd.DataFrame:
     acc = pd.read_csv(accuracy_path)
     mia = pd.read_csv(mia_path)
 
-    # round sigma to avoid float-equality issues during join
     acc["sigma"] = acc["sigma"].round(6)
     mia["sigma"] = mia["sigma"].round(6)
 
@@ -64,60 +75,93 @@ def load_and_join(accuracy_path: str, mia_path: str) -> pd.DataFrame:
 
 
 def make_figure(joined: pd.DataFrame, save_path: str):
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(9, 5.5))
 
-    # privacy axis: 1 - adversary score (half-integer rule)
     joined = joined.copy()
     joined["privacy"] = 1.0 - joined["score_half"]
 
+    # draw lines per k, and markers sized by sigma
     for k in sorted(joined["k"].unique()):
         sub = joined[joined["k"] == k].sort_values("sigma")
         color, marker, ls = K_STYLE.get(k, ("gray", "o", "-"))
 
+        # connecting line (sigma-ordered)
         ax.plot(
             sub["accuracy_obfuscated"], sub["privacy"],
-            color=color, linestyle=ls, marker=marker,
-            markersize=10, linewidth=2.0,
-            label=f"$k = {k}$",
+            color=color, linestyle=ls, linewidth=1.5,
+            alpha=0.6, zorder=1,
         )
 
-        # annotate each point with its sigma value
-        for _, row in sub.iterrows():
-            ax.annotate(
-                f"$\\sigma={row['sigma']:.2f}$",
-                xy=(row["accuracy_obfuscated"], row["privacy"]),
-                xytext=(8, 5), textcoords="offset points",
-                fontsize=9, color=color,
-            )
+        # markers: size encodes sigma
+        sizes = [sigma_to_size(s) ** 2 for s in sub["sigma"]]
+        ax.scatter(
+            sub["accuracy_obfuscated"], sub["privacy"],
+            s=sizes, c=color, marker=marker,
+            edgecolors="white", linewidths=1.0,
+            zorder=3,
+        )
 
-    # baseline accuracy as vertical reference line (utility ceiling)
+    # reference lines
     if "accuracy_baseline" in joined.columns:
         baseline_acc = joined["accuracy_baseline"].iloc[0]
         ax.axvline(
-            x=baseline_acc, color="black", linestyle=":", linewidth=1.5,
-            label=f"Baseline accuracy ({baseline_acc:.1f}%)",
+            x=baseline_acc, color="black", linestyle=":", linewidth=1.2,
+        )
+        ax.text(
+            baseline_acc, ax.get_ylim()[1] * 0.98 if ax.get_ylim()[1] else 0.5,
+            f" baseline ({baseline_acc:.1f}%)",
+            fontsize=9, color="black", va="top",
         )
 
-    # always-H+ baseline as horizontal privacy reference
     always_h_plus = joined["always_h_plus_half"].mean()
+    privacy_floor = 1.0 - always_h_plus
     ax.axhline(
-        y=1.0 - always_h_plus,
+        y=privacy_floor,
         color="dimgray", linestyle="--", linewidth=1.0,
-        label=f"Always-H$^+$ privacy floor ({1-always_h_plus:.2f})",
+    )
+    ax.text(
+        ax.get_xlim()[0] if ax.get_xlim()[0] else 40,
+        privacy_floor, f" always-$H^+$ floor ({privacy_floor:.2f})",
+        fontsize=9, color="dimgray", va="bottom",
     )
 
     ax.set_xlabel("Test accuracy (%)", fontsize=12)
     ax.set_ylabel(r"Privacy: $1 - \mathrm{normalized\ adversary\ score}$",
                   fontsize=12)
-    ax.set_title(
-        "Figure 4: Privacy-Utility Pareto Frontier\n"
-        "(half-integer weighted MIA score)",
-        fontsize=13, fontweight="bold",
-    )
     ax.grid(True, alpha=0.3)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.legend(fontsize=10, loc="best")
+
+    # -------- two separate legends, placed outside the plot --------
+    k_handles = [
+        Line2D([0], [0],
+               color=K_STYLE[k][0], linestyle=K_STYLE[k][2],
+               marker=K_STYLE[k][1], markersize=9, linewidth=1.5,
+               label=f"$k = {k}$")
+        for k in sorted(joined["k"].unique())
+    ]
+    sigma_vals = sorted(joined["sigma"].unique())
+    sigma_handles = [
+        Line2D([0], [0],
+               color="gray", linestyle="None",
+               marker="o", markersize=sigma_to_size(s),
+               label=f"$\\sigma = {s:.2f}$")
+        for s in sigma_vals
+    ]
+
+    leg_k = ax.legend(
+        handles=k_handles, title="Mixing",
+        loc="upper left", bbox_to_anchor=(1.02, 1.0),
+        fontsize=10, title_fontsize=11, frameon=True,
+    )
+    ax.add_artist(leg_k)
+
+    ax.legend(
+        handles=sigma_handles, title="Noise",
+        loc="upper left", bbox_to_anchor=(1.02, 0.55),
+        fontsize=10, title_fontsize=11, frameon=True,
+        labelspacing=1.4, handletextpad=1.0, borderpad=0.8,
+    )
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
