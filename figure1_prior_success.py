@@ -131,11 +131,10 @@ def plot_prior_success(
 
 
 if __name__ == "__main__":
-    print("Generating plot: prior success probability...")
     plot_prior_success(
         N=1000,
         n=50,
         m=100,
-        save_path="fig_prior_success.png",
+        save_path="fig1_prior_success.png",
     )
     print("\nDone.")

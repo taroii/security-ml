@@ -1,5 +1,7 @@
 # Learnable Obfuscation for Temporally Related Video Data
 
+<img src="fig3_int_vs_half.png" alt="Integer vs half-integer weights" width="70%">
+
 ## Setup
 
 ### 1. Create a conda environment
