@@ -1,6 +1,6 @@
 # Learnable Obfuscation for Temporally Related Video Data
 
-<img src="fig3_int_vs_half.png" alt="Integer vs half-integer weights" width="70%">
+<img src="images/fig3_int_vs_half.png" alt="Integer vs half-integer weights" width="90%">
 
 ## Setup
 
@@ -37,10 +37,10 @@ bash run_accuracy.sh --wait
 ```
 
 - `run_mia.sh` runs the membership-inference attack across `k = 0, 1, 5`, merges the per-cell results, and produces **Figure 2** and **Figure 3**.
-- `run_accuracy.sh --wait` runs the accuracy sweep across `k * sigma`, merges the per-cell results, and produces **Figure 4**. (Without `--wait` it launches jobs in the background and you must run `merge_accuracy.py` and `figure4_pareto.py` yourself once they finish.)
+- `run_accuracy.sh --wait` runs the accuracy sweep across `k * sigma`, merges the per-cell results, and produces **Figure 4**. (Without `--wait` it launches jobs in the background and you must run `src/merge_accuracy.py` and `src/figure4_pareto.py` yourself once they finish.)
 
 **Figure 1** is a standalone analytical plot and can be generated at any time:
 
 ```
-python figure1_prior_success.py
+python src/figure1_prior_success.py
 ```

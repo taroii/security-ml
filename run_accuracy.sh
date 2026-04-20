@@ -13,8 +13,8 @@
 # or run sequentially by setting it to 1.
 #
 # After all jobs finish:
-#   python merge_accuracy.py
-#   python figure4_pareto.py
+#   python src/merge_accuracy.py
+#   python src/figure4_pareto.py
 #
 # Usage:
 #   bash run_accuracy.sh                  # launches in background
@@ -22,7 +22,7 @@
 
 set -e
 
-mkdir -p logs accuracy_results
+mkdir -p logs accuracy_results images
 
 K_VALUES=(0 1 5)
 SIGMAS=(0.01 0.05 0.10 0.50)
@@ -32,7 +32,7 @@ MAX_PARALLEL=4   # adjust to fit your GPU memory; set to 1 for sequential
 FIRST_K="${K_VALUES[0]}"
 FIRST_SIGMA="${SIGMAS[0]}"
 echo "Running baseline-bearing job first: k=${FIRST_K}, sigma=${FIRST_SIGMA}"
-python main_video.py --k "${FIRST_K}" --sigma "${FIRST_SIGMA}" \
+python src/main_video.py --k "${FIRST_K}" --sigma "${FIRST_SIGMA}" \
     > "logs/acc_k${FIRST_K}_sigma${FIRST_SIGMA}.log" 2>&1
 echo "First job done."
 
@@ -51,7 +51,7 @@ for k in "${K_VALUES[@]}"; do
 
         log="logs/acc_k${k}_sigma${sigma}.log"
         echo "Launching k=${k}, sigma=${sigma} -> ${log}"
-        python main_video.py --k "${k}" --sigma "${sigma}" \
+        python src/main_video.py --k "${k}" --sigma "${sigma}" \
             > "${log}" 2>&1 &
         PIDS+=($!)
     done
@@ -69,8 +69,8 @@ if [[ "${1:-}" == "--wait" ]]; then
     echo "All jobs finished."
     echo
     echo "Merging accuracy results..."
-    python merge_accuracy.py
+    python src/merge_accuracy.py
     echo
     echo "Generating Figure 4 (requires merged_results.csv from MIA runs)..."
-    python figure4_pareto.py
+    python src/figure4_pareto.py
 fi

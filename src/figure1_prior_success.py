@@ -135,6 +135,6 @@ if __name__ == "__main__":
         N=1000,
         n=50,
         m=100,
-        save_path="fig1_prior_success.png",
+        save_path="./images/fig1_prior_success.png",
     )
     print("\nDone.")
