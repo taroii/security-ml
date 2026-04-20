@@ -1,19 +1,9 @@
-"""
-Plot prior success probability 1 - delta_0^{>=j} vs threshold j,
-comparing integer weights (exact match only) vs half-integer weights
-(partial credit for temporally proximate frames).
-Based on Lemma 2 (integer) and Lemma 3 (half-integer) of
-"Learnable Obfuscation for Temporally Related Video Data".
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.special import gammaln
 
 
-# ----------------------------
 # Integer-weight prior (vectorized)
-# ----------------------------
-
 def integer_prior_all_j(N: int, n: int) -> np.ndarray:
     """
     Returns array of 1 - delta_0^{>=j} for j = 1, ..., n
@@ -31,10 +21,7 @@ def integer_prior_all_j(N: int, n: int) -> np.ndarray:
     return sf[1:]
 
 
-# ----------------------------
 # Half-integer prior (vectorized, Lemma 3)
-# ----------------------------
-
 def half_integer_prior_all_j(
     N: int,
     n: int,
@@ -53,8 +40,6 @@ def half_integer_prior_all_j(
 
     Returns: shape (2n,) array for j = 0.5, 1.0, ..., n  (step 0.5)
     """
-    from scipy.special import gammaln
-
     N_C = N - n - m
     log_denom = gammaln(N + 1) - gammaln(n + 1) - gammaln(N - n + 1)
 
@@ -89,10 +74,7 @@ def half_integer_prior_all_j(
     return probs
 
 
-# ----------------------------
 # Plot: Prior success probability vs threshold j (linear scale)
-# ----------------------------
-
 def plot_prior_success(
     N: int = 1000,
     n: int = 50,

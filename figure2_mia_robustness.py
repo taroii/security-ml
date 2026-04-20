@@ -1,22 +1,3 @@
-"""
-figure2_mia_robustness.py
-
-Figure 2 of "Learnable Obfuscation for Temporally Related Video Data".
-
-Two-panel figure showing membership inference attack robustness vs noise
-level (sigma), swept over mixing parameter k:
-
-  Panel (a): H+ win rate vs sigma, one curve per k. Reference line at 0.5
-             (chance).
-
-  Panel (b): Normalized weighted score (half-integer rule) vs sigma, one
-             curve per k. Two reference lines: analytical Lemma-3 random
-             baseline and always-guess-H+ baseline.
-
-Reads merged_results.csv produced by merge_results.py.
-Writes fig2_mia_robustness.png.
-"""
-
 import argparse
 import os
 import sys

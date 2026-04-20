@@ -1,23 +1,3 @@
-"""
-figure3_integer_vs_half.py
-
-Figure 3 of "Learnable Obfuscation for Temporally Related Video Data".
-
-Three side-by-side panels (one per k value) comparing the empirical
-adversary score under integer vs half-integer weighting rules at
-matched noise level.
-
-For each panel:
-  x-axis = noise level sigma (log scale)
-  y-axis = normalized adversary score
-  curves: score_int (blue, solid) and score_half (red, dashed)
-
-Shares a y-axis across panels for direct visual comparison.
-
-Reads merged_results.csv produced by merge_results.py.
-Writes fig3_int_vs_half.png.
-"""
-
 import argparse
 import os
 import sys

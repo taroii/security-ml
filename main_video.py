@@ -1,24 +1,3 @@
-"""
-main_video.py
-
-Train a UCF-101 action classifier under learnable obfuscation, then
-report test accuracy. Used to populate the utility axis of Figure 4
-(privacy-utility Pareto frontier).
-
-Usage (one process per (k, sigma) cell, parallelize across cells):
-    python main_video.py --k 0 --sigma 0.01
-    python main_video.py --k 0 --sigma 0.05
-    ...
-    python main_video.py --k 5 --sigma 0.50
-
-The first invocation also trains and caches the no-obfuscation baseline
-(in accuracy_results/baseline.csv); subsequent invocations skip the
-baseline and only train the obfuscated model.
-
-Each (k, sigma) cell writes accuracy_results/acc_k{k}_sigma{sigma}.csv.
-Use merge_accuracy.py to combine into a single long-format CSV.
-"""
-
 import argparse
 import os
 import random
@@ -41,9 +20,8 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.models import resnet18, ResNet18_Weights
 
 
-# ----------------------------
+
 # Temporal classifier
-# ----------------------------
 class TransformerClassifier(nn.Module):
     def __init__(self, input_dim: int, num_classes: int, num_frames: int = 16,
                  nhead: int = 8, num_layers: int = 2, dim_feedforward: int = 512,
@@ -72,9 +50,8 @@ def soft_ce_loss(logits: torch.Tensor, soft_targets: torch.Tensor) -> torch.Tens
     return -(soft_targets * logp).sum(dim=1).mean()
 
 
-# ----------------------------
+
 # Utilities
-# ----------------------------
 def set_seed(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -89,9 +66,8 @@ def get_device():
     return torch.device("cpu")
 
 
-# ----------------------------
+
 # Dataset download
-# ----------------------------
 UCF101_VIDEO_URL = "https://www.crcv.ucf.edu/data/UCF101/UCF101.rar"
 UCF101_ANNOT_URL = "https://www.crcv.ucf.edu/data/UCF101/UCF101TrainTestSplits-RecognitionTask.zip"
 
@@ -186,9 +162,8 @@ def download_ucf101(data_root: str, video_root: str, annot_root: str):
         print("Videos ready.\n")
 
 
-# ----------------------------
+
 # Video loading
-# ----------------------------
 def load_video_frames(path: str, num_frames: int = 16, size: int = 224) -> torch.Tensor:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -217,9 +192,8 @@ def load_video_frames(path: str, num_frames: int = 16, size: int = 224) -> torch
     return clip
 
 
-# ----------------------------
+
 # UCF-101 annotation parsing
-# ----------------------------
 def parse_ucf101_split(
     annot_root: str, split: int = 1
 ) -> Tuple[dict, List[Tuple[str, int]], List[Tuple[str, int]]]:
@@ -255,9 +229,8 @@ def parse_ucf101_split(
     return class_to_idx, train_list, test_list
 
 
-# ----------------------------
+
 # UCF-101 Dataset
-# ----------------------------
 class UCF101Dataset(Dataset):
     def __init__(self, video_root, samples, num_frames=16, size=224):
         self.video_root = video_root
@@ -275,9 +248,8 @@ class UCF101Dataset(Dataset):
         return clip, label
 
 
-# ----------------------------
+
 # Per-frame embedding with ResNet-18
-# ----------------------------
 @torch.no_grad()
 def embed_dataset(
     video_root: str,
@@ -337,9 +309,8 @@ def embed_dataset(
     return X, y
 
 
-# ----------------------------
+
 # Dataset-agnostic pipeline
-# ----------------------------
 def stratified_subset(X, y, n, c, seed):
     assert n % c == 0, "n must be divisible by number of classes"
     n0 = n // c
@@ -457,9 +428,8 @@ def eval_model_baseline(model, Xte, yte, device, batch_size=64):
     return 100.0 * correct / total
 
 
-# ----------------------------
+
 # Training routines
-# ----------------------------
 def train_baseline(Xn, yn, Xte, yte, d0, T, c, device,
                    epochs, lr, train_bs):
     """Train no-obfuscation baseline. Returns final test accuracy."""
@@ -535,9 +505,8 @@ def train_obfuscated(Xn, yn, Xte, yte, d0, T, c, k, sigma, m_mixed,
     return eval_model(model, Xte, yte, inv_perm2, device=device)
 
 
-# ----------------------------
+
 # Main
-# ----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train UCF-101 classifier under obfuscation; report accuracy."
@@ -600,7 +569,7 @@ if __name__ == "__main__":
     Xn, yn = stratified_subset(Xtr, ytr, n=args.n, c=c, seed=args.seed)
     print(f"Subset: {Xn.shape}")
 
-    # --- Baseline (cached, runs once across all cells) ---
+    # Baseline (cached, runs once across all cells)
     baseline_path = os.path.join(args.results_dir, "baseline.csv")
     if os.path.exists(baseline_path):
         baseline_df = pd.read_csv(baseline_path)
@@ -619,7 +588,7 @@ if __name__ == "__main__":
         }]).to_csv(baseline_path, index=False, float_format="%.4f")
         print(f"Cached baseline accuracy: {baseline_acc:.2f}% -> {baseline_path}")
 
-    # --- Obfuscated for this (k, sigma) ---
+    # Obfuscated for this (k, sigma)
     obf_acc = train_obfuscated(
         Xn, yn, Xte, yte, d0, T, c,
         k=args.k, sigma=args.sigma, m_mixed=args.m_mixed,

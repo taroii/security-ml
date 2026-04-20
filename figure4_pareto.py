@@ -1,26 +1,3 @@
-"""
-figure4_pareto.py
-
-Figure 4 of "Learnable Obfuscation for Temporally Related Video Data".
-
-Privacy-utility scatter. For each (k, sigma) cell:
-  x-axis = test accuracy of obfuscated classifier (utility)
-  y-axis = 1 - normalized adversary score (privacy; larger = more private)
-
-Encoding:
-  color + linestyle -> k (mixing intensity)
-  marker size       -> sigma (noise level, small = low sigma)
-
-Two legends (one for k, one for sigma) are placed outside the plot area
-on the right to keep the data region uncluttered.
-
-Reference lines:
-  vertical dotted = no-obfuscation baseline accuracy
-  horizontal dashed = always-H+ privacy floor
-
-Joins merged_accuracy.csv with merged_results.csv on (k, sigma).
-"""
-
 import argparse
 import os
 import sys
@@ -132,7 +109,6 @@ def make_figure(joined: pd.DataFrame, save_path: str):
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    # -------- two separate legends, placed outside the plot --------
     k_handles = [
         Line2D([0], [0],
                color=K_STYLE[k][0], linestyle=K_STYLE[k][2],

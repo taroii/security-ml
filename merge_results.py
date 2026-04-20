@@ -1,14 +1,3 @@
-"""
-merge_results.py
-
-Glob all per-cell CSV files written by membership_inference.py and
-combine into a single long-format DataFrame for plotting.
-
-Usage:
-    python merge_results.py
-    python merge_results.py --results-dir ./results --output merged.csv
-"""
-
 import argparse
 import glob
 import os

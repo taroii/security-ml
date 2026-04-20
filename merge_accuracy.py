@@ -1,14 +1,3 @@
-"""
-merge_accuracy.py
-
-Glob all per-cell accuracy CSVs written by main_video.py and combine
-into a single long-format DataFrame.
-
-Usage:
-    python merge_accuracy.py
-    python merge_accuracy.py --results-dir ./accuracy_results --output merged_accuracy.csv
-"""
-
 import argparse
 import glob
 import os

@@ -1,34 +1,44 @@
-# Security ML
+# Learnable Obfuscation for Temporally Related Video Data
 
-Paper in question: https://people.csail.mit.edu/devadas/pubs/Learnable_Obfuscation.pdf
+## Setup
 
-### Personal Setup (conda)
+### 1. Create a conda environment
 
 ```
-conda create -n security python=3.11 # rename security to whatever you want
+conda create -n security python=3.11
 conda activate security
 ```
 
-### Installing Torch w/ cuda
+### 2. Install PyTorch with CUDA
 
-To utilize cuda, install torch according to this page: https://pytorch.org/get-started/locally/
-
-For example:
+Follow https://pytorch.org/get-started/locally/ for the right command for your platform. For example:
 
 ```
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 ```
 
-If no GPU, pip install torch and torchvision normally. 
+If you don't have a GPU, install `torch` and `torchvision` normally.
 
-### Install remaining dependencies
-
-```
-pip install -r requirements.txt
-```
-
-### Run Code
+### 3. Install remaining dependencies
 
 ```
-python main.py
+pip3 install -r requirements.txt
+```
+
+## Running the pipeline
+
+Run the two scripts in this order:
+
+```
+bash run_mia.sh
+bash run_accuracy.sh --wait
+```
+
+- `run_mia.sh` runs the membership-inference attack across `k = 0, 1, 5`, merges the per-cell results, and produces **Figure 2** and **Figure 3**.
+- `run_accuracy.sh --wait` runs the accuracy sweep across `k * sigma`, merges the per-cell results, and produces **Figure 4**. (Without `--wait` it launches jobs in the background and you must run `merge_accuracy.py` and `figure4_pareto.py` yourself once they finish.)
+
+**Figure 1** is a standalone analytical plot and can be generated at any time:
+
+```
+python figure1_prior_success.py
 ```

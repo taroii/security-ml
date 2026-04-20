@@ -216,3 +216,10 @@ ucf101_r3d18_embed.pt
 *.npz
 
 .DS_Store
+
+*.csv
+*.md
+logs/
+results/
+attack_results_10_trials/
+accuracy_results/

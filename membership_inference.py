@@ -1,27 +1,3 @@
-"""
-membership_inference.py
-
-Weighted membership inference attack for temporally correlated video data.
-Follows Section 7.2 of Xiao et al. (2024), extended to half-integer weights
-based on temporal proximity of frame indices within each video.
-
-Pipeline:
-  - U = pool of individual grayscale frames across all training videos
-  - X = n-subset of frames (the T sampled frames per video, across all videos)
-  - T_X(X) = Pi1 M X W + B  (Algorithm 1 of Xiao et al.)
-  - For k=0, the mixing step M is skipped: T_X(X) = Pi1 X W + B
-  - Adversary observes o = T_X(X) and tries to infer which T frames
-    were sampled from each target video, scored with half-integer weights.
-
-Usage (one process per k value, parallelize across k):
-    python membership_inference.py --k 0
-    python membership_inference.py --k 1
-    python membership_inference.py --k 5
-
-Each process iterates over all sigma values internally and writes one CSV
-per (k, sigma) cell to ./results/. Use merge_results.py to combine.
-"""
-
 import argparse
 import os
 from typing import List, Tuple
@@ -39,9 +15,8 @@ from main_video import (
 )
 
 
-# ----------------------------
+
 # Frame loading: grayscale, no embedding model
-# ----------------------------
 def load_video_frames_gray(
     path:       str,
     num_frames: int = 16,
@@ -115,9 +90,8 @@ def load_video_frames_gray(
     return frames, frame_indices, total_frames
 
 
-# ----------------------------
+
 # Build frame pool U
-# ----------------------------
 def build_frame_pool(
     video_root: str,
     train_list: List[Tuple[str, int]],
@@ -177,9 +151,8 @@ def build_frame_pool(
     return U, labels, frame_indices, clip_ids, clip_lengths
 
 
-# ----------------------------
+
 # Mechanism: with or without mixing
-# ----------------------------
 def class_k_mix(
     X: np.ndarray,
     labels: np.ndarray,
@@ -239,9 +212,8 @@ def apply_mechanism(
     return Xm[perm] @ W + B
 
 
-# ----------------------------
+
 # Weighted scoring
-# ----------------------------
 def compute_weighted_score(
     guessed_indices: np.ndarray,
     true_indices: np.ndarray,
@@ -295,9 +267,8 @@ def lemma3_random_baseline(
     return float((num_frames + m_half / 2.0) / float(N_total))
 
 
-# ----------------------------
+
 # Log-likelihood under Gaussian noise
-# ----------------------------
 def log_likelihood(
     o: np.ndarray,
     o_sim: np.ndarray,
@@ -308,9 +279,8 @@ def log_likelihood(
     return -float(np.sum(diff ** 2)) / (2.0 * sigma**2 )
 
 
-# ----------------------------
+
 # Cached observed release o = T_X(X)
-# ----------------------------
 def compute_or_load_o(
     U: np.ndarray,
     labels: np.ndarray,
@@ -338,9 +308,8 @@ def compute_or_load_o(
     return o
 
 
-# ----------------------------
+
 # Main attack
-# ----------------------------
 def run_attack(
     U: np.ndarray,
     labels: np.ndarray,
@@ -524,9 +493,8 @@ def run_attack(
     }
 
 
-# ----------------------------
+
 # Entry point
-# ----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Run weighted MIA for one k value across all sigmas."
