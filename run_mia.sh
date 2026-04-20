@@ -2,7 +2,7 @@
 set -e
 mkdir -p logs results cache images
 
-# Run sequentially: k=1 and k=5 first (small mixed datasets, c²=10201 rows)
+# Run sequentially: k=1 and k=5 first (small mixed datasets, c^2=10201 rows)
 # then k=0 last (huge raw frame pool, ~150k rows)
 for k in 1 5 0; do
     log="logs/mia_k${k}.log"
