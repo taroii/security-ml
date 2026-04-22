@@ -1,0 +1,2 @@
+k,sigma,n_targets,n_trials,h_plus_win_rate,h_plus_win_se,score_half,score_int,score_half_std,score_int_std,always_h_plus_half,always_h_plus_int,random_baseline_half,random_baseline_int,mean_delta,std_delta
+0,0.100000,50,10,0.480000,0.070654,0.580000,0.522500,0.407793,0.460428,1.000000,1.000000,0.000330,0.000105,32102253.898460,770679755.755067
