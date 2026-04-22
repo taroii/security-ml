@@ -218,8 +218,8 @@ ucf101_r3d18_embed.pt
 .DS_Store
 
 *.csv
+!results/*.csv
+!accuracy_results/*.csv
 *.md
 logs/
-results/
 attack_results_10_trials/
-accuracy_results/

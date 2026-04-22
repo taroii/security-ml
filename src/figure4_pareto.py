@@ -149,7 +149,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--accuracy", type=str, default="./merged_accuracy.csv")
     parser.add_argument("--mia", type=str, default="./merged_results.csv")
-    parser.add_argument("--output", type=str, default="./images/fig4_pareto.png")
+    parser.add_argument("--output", type=str, default="./images/fig4_pareto.pdf")
     args = parser.parse_args()
 
     joined = load_and_join(args.accuracy, args.mia)

@@ -9,9 +9,10 @@ from main_video import parse_ucf101_split
 
 if __name__ == "__main__":
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    CACHE_TRAIN = os.path.join(SCRIPT_DIR, "ucf101_resnet18_perframe_train.pt")
-    ANNOT_ROOT = os.path.join(SCRIPT_DIR, "data", "ucfTrainTestlist")
-    OUT_PATH = os.path.join(SCRIPT_DIR, "figure5_visual_obfuscation.png")
+    PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+    CACHE_TRAIN = os.path.join(PROJECT_ROOT, "ucf101_resnet18_perframe_train.pt")
+    ANNOT_ROOT = os.path.join(PROJECT_ROOT, "data", "ucfTrainTestlist")
+    OUT_PATH = os.path.join(PROJECT_ROOT, "images", "figure5_visual_obfuscation.pdf")
 
     CLASS_A_NAME = "Basketball"
     CLASS_B_NAME = "Skiing"

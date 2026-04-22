@@ -111,7 +111,7 @@ def make_figure(df: pd.DataFrame, save_path: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=str, default="./merged_results.csv")
-    parser.add_argument("--output", type=str, default="./images/fig2_mia_robustness.png")
+    parser.add_argument("--output", type=str, default="./images/fig2_mia_robustness.pdf")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):

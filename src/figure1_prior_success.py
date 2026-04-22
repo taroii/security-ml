@@ -79,7 +79,7 @@ def plot_prior_success(
     N: int = 1000,
     n: int = 50,
     m: int = 100,
-    save_path: str = "fig_prior_success.png",
+    save_path: str = "fig_prior_success.pdf",
 ):
     """
     Plot 1 - delta_0^{>=j} vs j, integer vs half-integer weights,
@@ -135,6 +135,6 @@ if __name__ == "__main__":
         N=1000,
         n=50,
         m=100,
-        save_path="./images/fig1_prior_success.png",
+        save_path="./images/fig1_prior_success.pdf",
     )
     print("\nDone.")
