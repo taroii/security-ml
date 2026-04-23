@@ -139,3 +139,86 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(OUT_PATH, dpi=150, bbox_inches="tight")
     print(f"Wrote {OUT_PATH}")
+
+
+    # ---- Pixel-space MIA visualization ----
+    # Mirrors (a)/(b)/(c) above but in the MIA pipeline (112x112 grayscale
+    # pixels, per-frame mixing, no per-clip constraint). Projection W is
+    # omitted so the output stays pixel-shaped and visually interpretable.
+    MIA_CACHE = os.path.join(SCRIPT_DIR, "ucf101_frame_pool_gray_random.npz")
+    MIA_OUT_PATH = os.path.join(
+        PROJECT_ROOT, "images", "figure5_visual_obfuscation_pixel.pdf"
+    )
+    SIZE = 112
+    N_DISPLAY = 8
+
+    if not os.path.exists(MIA_CACHE):
+        print(f"Frame pool cache not found: {MIA_CACHE}", file=sys.stderr)
+        print(
+            "Skipping pixel-space figure. Build it via "
+            "`python src/membership_inference.py --k 0` once.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
+    print(f"Loading frame pool from {MIA_CACHE}...")
+    pool = np.load(MIA_CACHE)
+    U_pool = pool["U"].astype(np.float32)
+    pool_labels = pool["labels"]
+    pool_clip_ids = pool["clip_ids"]
+
+    a_rows = np.where(pool_labels == CLASS_A)[0]
+    b_rows = np.where(pool_labels == CLASS_B)[0]
+
+    # Original row: 8 frames from a single Basketball clip.
+    clip_A_id = int(pool_clip_ids[a_rows][0])
+    clip_A_rows = np.where(pool_clip_ids == clip_A_id)[0][:N_DISPLAY]
+    orig_px = U_pool[clip_A_rows].reshape(-1, SIZE, SIZE)
+
+    # Mixed row: replicate class_k_mix for the (Basketball, Skiing) pair,
+    # N_DISPLAY independent draws (MIA has no per-clip constraint).
+    pix_rng = np.random.default_rng(SEED)
+    mixed_px = np.zeros((N_DISPLAY, SIZE, SIZE), dtype=np.float32)
+    for t in range(N_DISPLAY):
+        idx_a = pix_rng.choice(a_rows, size=K, replace=True)
+        idx_b = pix_rng.choice(b_rows, size=K, replace=True)
+        mixed_px[t] = (
+            U_pool[np.concatenate([idx_a, idx_b])].mean(axis=0).reshape(SIZE, SIZE)
+        )
+
+    # Noised row: +B Gaussian noise; W is intentionally skipped so output
+    # stays in 112x112 pixel space for display.
+    noise_px = pix_rng.standard_normal(mixed_px.shape).astype(np.float32) * SIGMA
+    noised_px = mixed_px + noise_px
+
+    vmin_px = float(min(orig_px.min(), mixed_px.min(), noised_px.min()))
+    vmax_px = float(max(orig_px.max(), mixed_px.max(), noised_px.max()))
+
+    fig2, axes2 = plt.subplots(3, N_DISPLAY, figsize=(N_DISPLAY * 1.4, 5.2))
+
+    row_data = [orig_px, mixed_px, noised_px]
+    row_labels = [
+        f"(a) Original\nframes\n({CLASS_A_NAME})",
+        f"(b) After $M$\nper-frame mix\nwith {CLASS_B_NAME}\n($k$={K})",
+        f"(c) After $+B$\nGaussian noise\n($\\sigma$={SIGMA})",
+    ]
+
+    for r, (data, label) in enumerate(zip(row_data, row_labels)):
+        for col in range(N_DISPLAY):
+            ax = axes2[r, col]
+            ax.imshow(data[col], cmap="gray", vmin=vmin_px, vmax=vmax_px)
+            ax.set_xticks([])
+            ax.set_yticks([])
+        axes2[r, 0].set_ylabel(
+            label, fontsize=9, rotation=0, ha="right", va="center", labelpad=6,
+        )
+
+    fig2.suptitle(
+        "MIA pipeline: pixel-space obfuscation of grayscale $112{\\times}112$ "
+        "frames ($W$ omitted for visualization)",
+        fontsize=11,
+        y=1.00,
+    )
+    plt.tight_layout()
+    plt.savefig(MIA_OUT_PATH, dpi=150, bbox_inches="tight")
+    print(f"Wrote {MIA_OUT_PATH}")
