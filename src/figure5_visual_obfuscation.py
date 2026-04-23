@@ -178,14 +178,28 @@ if __name__ == "__main__":
         sys.exit(1)
 
     orig_px = load_color_mid_frame(os.path.join(VIDEO_ROOT, a_paths[0]), SIZE)
-    skiing_px = load_color_mid_frame(os.path.join(VIDEO_ROOT, b_paths[0]), SIZE)
 
-    # Mixed: reuse the Basketball frame from (a), averaged with one Skiing
-    # frame. class_k_mix normally samples both sides fresh; fixing the
-    # class-A contribution here keeps the (a)->(b)->(c) comparison direct.
-    mixed_px = (orig_px + skiing_px) / 2.0
-
+    # Mixed: average orig_px with K-1 additional Basketball frames and K
+    # Skiing frames, matching class_k_mix's 2K-way average. Fixing one of the
+    # class-A slots to orig_px keeps the (a)->(b)->(c) comparison direct.
     pix_rng = np.random.default_rng(SEED)
+    extra_a_idxs = (
+        pix_rng.choice(len(a_paths), size=K - 1, replace=True)
+        if K > 1 else np.array([], dtype=int)
+    )
+    b_idxs = pix_rng.choice(len(b_paths), size=K, replace=True)
+
+    extra_a_frames = [
+        load_color_mid_frame(os.path.join(VIDEO_ROOT, a_paths[int(i)]), SIZE)
+        for i in extra_a_idxs
+    ]
+    b_frames = [
+        load_color_mid_frame(os.path.join(VIDEO_ROOT, b_paths[int(i)]), SIZE)
+        for i in b_idxs
+    ]
+    contribs = np.stack([orig_px] + extra_a_frames + b_frames, axis=0)
+    mixed_px = contribs.mean(axis=0)
+
     noise_px = pix_rng.standard_normal(mixed_px.shape).astype(np.float32) * SIGMA
     noised_px = mixed_px + noise_px
 
