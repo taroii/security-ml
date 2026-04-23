@@ -16,7 +16,7 @@ if __name__ == "__main__":
 
     CLASS_A_NAME = "Basketball"
     CLASS_B_NAME = "Skiing"
-    K = 1
+    K = 5
     SIGMA = 0.1
     SEED = 42
     SPLIT = 1
