@@ -1,6 +1,7 @@
 import os
 import sys
 
+import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -141,54 +142,52 @@ if __name__ == "__main__":
     # print(f"Wrote {OUT_PATH}")
 
 
-    # ---- Pixel-space MIA visualization ----
-    # Mirrors (a)/(b)/(c) above but in the MIA pipeline (112x112 grayscale
-    # pixels, per-frame mixing, no per-clip constraint). Projection W is
-    # omitted so the output stays pixel-shaped and visually interpretable.
-    MIA_CACHE = os.path.join(SCRIPT_DIR, "ucf101_frame_pool_gray_random.npz")
+    # ---- Pixel-space obfuscation visualization ----
+    # Load one color frame each from a Basketball and Skiing video at 224x224,
+    # average them (k=1), and add Gaussian noise. Visualization-only: the real
+    # MIA pipeline operates on 112x112 grayscale frames.
+    VIDEO_ROOT = os.path.join(PROJECT_ROOT, "data", "UCF-101")
     MIA_OUT_PATH = os.path.join(
         PROJECT_ROOT, "images", "figure5_visual_obfuscation_pixel.pdf"
     )
-    SIZE = 112
+    SIZE = 224
 
-    if not os.path.exists(MIA_CACHE):
-        print(f"Frame pool cache not found: {MIA_CACHE}", file=sys.stderr)
+    def load_color_mid_frame(path: str, size: int) -> np.ndarray:
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {path}")
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total // 2))
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            raise RuntimeError(f"Failed to read frame from {path}")
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = cv2.resize(frame, (size, size))
+        return frame.astype(np.float32) / 255.0
+
+    _, train_list, _ = parse_ucf101_split(ANNOT_ROOT, SPLIT)
+    a_paths = [rp for rp, lab in train_list if lab == CLASS_A]
+    b_paths = [rp for rp, lab in train_list if lab == CLASS_B]
+    if not a_paths or not b_paths:
         print(
-            "Skipping pixel-space figure. Build it via "
-            "`python src/membership_inference.py --k 0` once.",
+            f"No training videos for {CLASS_A_NAME} or {CLASS_B_NAME} in "
+            f"train_list. Check {ANNOT_ROOT}.",
             file=sys.stderr,
         )
-        sys.exit(0)
+        sys.exit(1)
 
-    print(f"Loading frame pool from {MIA_CACHE}...")
-    pool = np.load(MIA_CACHE)
-    U_pool = pool["U"].astype(np.float32)
-    pool_labels = pool["labels"]
-    pool_clip_ids = pool["clip_ids"]
+    orig_px = load_color_mid_frame(os.path.join(VIDEO_ROOT, a_paths[0]), SIZE)
+    skiing_px = load_color_mid_frame(os.path.join(VIDEO_ROOT, b_paths[0]), SIZE)
 
-    a_rows = np.where(pool_labels == CLASS_A)[0]
-    b_rows = np.where(pool_labels == CLASS_B)[0]
-
-    # Original: first frame of the first Basketball clip in the pool.
-    clip_A_id = int(pool_clip_ids[a_rows][0])
-    clip_A_rows = np.where(pool_clip_ids == clip_A_id)[0]
-    orig_px = U_pool[clip_A_rows[0]].reshape(SIZE, SIZE)
-
-    # Mixed: reuse the Basketball frame from (a) and average it with one
-    # Skiing frame sampled from the pool. class_k_mix normally samples both
-    # sides fresh; fixing the class-A contribution here makes the visual
-    # comparison across panels direct.
-    pix_rng = np.random.default_rng(SEED)
-    skiing_idx = int(pix_rng.choice(b_rows))
-    skiing_px = U_pool[skiing_idx].reshape(SIZE, SIZE)
+    # Mixed: reuse the Basketball frame from (a), averaged with one Skiing
+    # frame. class_k_mix normally samples both sides fresh; fixing the
+    # class-A contribution here keeps the (a)->(b)->(c) comparison direct.
     mixed_px = (orig_px + skiing_px) / 2.0
 
-    # Noised: +B Gaussian noise; W omitted to keep output pixel-shaped.
+    pix_rng = np.random.default_rng(SEED)
     noise_px = pix_rng.standard_normal(mixed_px.shape).astype(np.float32) * SIGMA
     noised_px = mixed_px + noise_px
-
-    vmin_px = float(min(orig_px.min(), mixed_px.min(), noised_px.min()))
-    vmax_px = float(max(orig_px.max(), mixed_px.max(), noised_px.max()))
 
     fig2, axes2 = plt.subplots(1, 3, figsize=(9, 3.6))
     panels = [orig_px, mixed_px, noised_px]
@@ -198,7 +197,7 @@ if __name__ == "__main__":
         f"(c) After $+B$: Gaussian noise ($\\sigma$={SIGMA})",
     ]
     for ax, panel, caption in zip(axes2, panels, captions):
-        ax.imshow(panel, cmap="gray", vmin=vmin_px, vmax=vmax_px)
+        ax.imshow(np.clip(panel, 0.0, 1.0))
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_xlabel(caption, fontsize=10, labelpad=8)
