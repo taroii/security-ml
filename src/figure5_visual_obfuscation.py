@@ -174,13 +174,14 @@ if __name__ == "__main__":
     clip_A_rows = np.where(pool_clip_ids == clip_A_id)[0]
     orig_px = U_pool[clip_A_rows[0]].reshape(SIZE, SIZE)
 
-    # Mixed: one draw from class_k_mix for the (Basketball, Skiing) pair.
+    # Mixed: reuse the Basketball frame from (a) and average it with one
+    # Skiing frame sampled from the pool. class_k_mix normally samples both
+    # sides fresh; fixing the class-A contribution here makes the visual
+    # comparison across panels direct.
     pix_rng = np.random.default_rng(SEED)
-    idx_a_pick = pix_rng.choice(a_rows, size=K, replace=True)
-    idx_b_pick = pix_rng.choice(b_rows, size=K, replace=True)
-    mixed_px = (
-        U_pool[np.concatenate([idx_a_pick, idx_b_pick])].mean(axis=0).reshape(SIZE, SIZE)
-    )
+    skiing_idx = int(pix_rng.choice(b_rows))
+    skiing_px = U_pool[skiing_idx].reshape(SIZE, SIZE)
+    mixed_px = (orig_px + skiing_px) / 2.0
 
     # Noised: +B Gaussian noise; W omitted to keep output pixel-shaped.
     noise_px = pix_rng.standard_normal(mixed_px.shape).astype(np.float32) * SIGMA
