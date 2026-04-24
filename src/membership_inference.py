@@ -225,7 +225,7 @@ def compute_weighted_score(
     Weighted overlap between guessed and true frame indices.
 
     weight_rule:
-      "half"    : w=1 if exact, w=1/2 if dist <= 0.05*clip_length, else 0
+      "half"    : w=1 if exact, w=1/2 if dist <= 0.01*clip_length, else 0
       "integer" : w=1 if exact, else 0  (binary baseline)
     """
     window = window_frac * clip_length
