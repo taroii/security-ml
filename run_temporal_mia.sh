@@ -147,9 +147,22 @@ run_accuracy() {
 run_plots() {
     echo
     echo "--- Plots ---"
+    # Refresh both merged CSVs in case results-dir / accuracy_results
+    # changed since the last merge (so fig4 doesn't read stale data).
+    if compgen -G "$RESULTS_DIR/attack_k*_sigma*.csv" > /dev/null; then
+        "${PY[@]}" src/merge_results.py \
+            --results-dir "$RESULTS_DIR" \
+            --output ./merged_results.csv
+    fi
+    if compgen -G "$ACC_DIR/acc_k*_sigma*.csv" > /dev/null; then
+        "${PY[@]}" src/merge_accuracy.py \
+            --results-dir "$ACC_DIR" \
+            --output ./merged_accuracy.csv
+    fi
     "${PY[@]}" src/figure2_mia_robustness.py \
         --input ./merged_results.csv \
-        --output "$IMG_DIR/fig2_mia_robustness.pdf"
+        --output "$IMG_DIR/fig2_mia_robustness.pdf" || \
+        echo "  [warn] figure2 failed; inspect later"
     "${PY[@]}" src/figure3_integer_vs_half.py \
         --input ./merged_results.csv \
         --output "$IMG_DIR/fig3_int_vs_half.pdf" || \

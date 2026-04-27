@@ -36,14 +36,17 @@ STD_HALF = "attack3_score_half_std"
 def plot_panel(ax, df_k: pd.DataFrame, k: int, show_ylabel: bool):
     """One panel for a single k value: Attack 3 integer vs half-integer."""
     sub = df_k.sort_values("sigma")
+    # SE of the mean uses n_targets * n_trials per-(target, trial) draws.
     n_t = sub["n_targets"].iloc[0]
+    n_tr = sub["n_trials"].iloc[0] if "n_trials" in sub.columns else 1
+    n_eff = max(1, int(n_t) * int(n_tr))
 
     for rule, score_col, std_col in (
         ("int",  COL_INT,  STD_INT),
         ("half", COL_HALF, STD_HALF),
     ):
         color, marker, ls, label = RULE_STYLE[rule]
-        se = sub[std_col] / np.sqrt(n_t)
+        se = sub[std_col] / np.sqrt(n_eff)
 
         ax.errorbar(
             sub["sigma"], sub[score_col],

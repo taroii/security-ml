@@ -374,6 +374,7 @@ def lira_score_clip_candidates(
     """
     UW = trial["UW"]
     perm = trial["perm"]
+    inv_perm = trial["inv_perm"]
     records = trial["records"]
     coef = trial["coef"]
     m = trial["m"]
@@ -391,32 +392,42 @@ def lira_score_clip_candidates(
 
     scores = np.zeros(n_cand, dtype=np.float32)
 
-    # For each candidate clip c: pred_diff_W[i] = sum over slot-hits in
-    # records[i] of (UW[c_rows[slot]] - UW[counterfactual_rows[slot]]) * coef.
-    # We loop over candidates; per candidate the cost is the total number
-    # of slot-hits across all mixed rows (~T*c for typical M_mix touching).
+    # k=0: pred is sparse with only T nonzero rows (target_rows). The
+    # post-perm row positions of the target slots are inv_perm[target_rows].
+    # Use that to compute the residual-pred dot and the squared-norm in
+    # O(T*d) instead of O(N_total*d).
+    if k == 0:
+        target_perm_idx = inv_perm[target_rows]                  # (T,)
+        residual_at_target = residual[target_perm_idx]           # (T, d)
+        for ci in range(n_cand):
+            c_rows = candidate_clip_rows[ci]
+            slot_diff_W = (
+                UW[c_rows].astype(np.float32)
+                - UW[counterfactual_rows].astype(np.float32)
+            )                                                     # (T, d)
+            dot = float((residual_at_target * slot_diff_W).sum())
+            nrm = float((slot_diff_W * slot_diff_W).sum())
+            scores[ci] = (dot - 0.5 * nrm) / (sigma ** 2)
+        return scores
+
+    # k>=1: pred has nonzero entries only at mixed rows that touch a target
+    # slot (records_target_hits). Per-candidate cost is the total slot-hit
+    # count across all mixed rows (~ T*c for typical M_mix).
     for ci in range(n_cand):
         c_rows = candidate_clip_rows[ci]
         slot_diff_W = (
             UW[c_rows].astype(np.float32) - UW[counterfactual_rows].astype(np.float32)
         )  # (T, d)
-        if k >= 1:
-            pred = np.zeros((m, d), dtype=np.float32)
-            for i, hits in enumerate(records_target_hits):
-                if not hits:
-                    continue
-                acc = np.zeros(d, dtype=np.float32)
-                for slot_in_target, _ in hits:
-                    acc += slot_diff_W[slot_in_target] * coef
-                pred[i] = acc
-            pred_perm = pred[perm]
-        else:
-            pred = np.zeros_like(UW)
-            pred[target_rows] = slot_diff_W
-            pred_perm = pred[perm]
+        pred = np.zeros((m, d), dtype=np.float32)
+        for i, hits in enumerate(records_target_hits):
+            if not hits:
+                continue
+            acc = np.zeros(d, dtype=np.float32)
+            for slot_in_target, _ in hits:
+                acc += slot_diff_W[slot_in_target] * coef
+            pred[i] = acc
+        pred_perm = pred[perm]
 
-        # LR score, ignoring constants:
-        # (residual . pred_perm) / sigma^2 - 0.5 ||pred_perm||^2 / sigma^2
         dot = float((residual * pred_perm).sum())
         nrm = float((pred_perm * pred_perm).sum())
         scores[ci] = (dot - 0.5 * nrm) / (sigma ** 2)
@@ -442,6 +453,7 @@ def lira_score_frame_candidates(
     """
     UW = trial["UW"]
     perm = trial["perm"]
+    inv_perm = trial["inv_perm"]
     records = trial["records"]
     coef = trial["coef"]
     m = trial["m"]
@@ -457,13 +469,30 @@ def lira_score_frame_candidates(
     T = len(target_rows)
     inv_T = 1.0 / float(T)
 
-    # Precompute sum_of_target_slot_coefs per mixed row (alpha-like vector)
-    # but slot-specific. For a candidate with feature vector u_r = UW[r],
-    # pred_diff_W[i] = (sum_{slot s touched by row i} (u_r - UW[cf_rows[s]]) * coef) / T
-    # = (alpha_rows[i] * u_r - cf_contrib[i]) / T
-    # where alpha_rows[i] = sum of coef over slot-hits, and
-    #       cf_contrib[i] = sum over hits of UW[cf_rows[s]] * coef.
-    if k >= 1:
+    # Sparse summary statistics drive every per-candidate score:
+    #   residual_alpha = sum_j alpha_perm[j] * residual[j]
+    #   cf_dot_residual = sum_j residual[j] . cf_perm[j]
+    #   alpha2_sum = sum_j alpha_perm[j]^2
+    #   cf_norm2_sum = sum_j ||cf_perm[j]||^2
+    #   a_cf = sum_j alpha_perm[j] * cf_perm[j]
+    # For k=0, alpha_perm is 0/1 valued at inv_perm[target_rows] only and
+    # cf_perm is nonzero only there too — we compute everything by indexing
+    # those T positions, no full (N_total, d) materialization.
+    if k == 0:
+        target_perm_idx = inv_perm[target_rows]              # (T,)
+        residual_at_target = residual[target_perm_idx]       # (T, d)
+        cf_at_target = UW[counterfactual_rows].astype(np.float32)  # (T, d)
+
+        residual_alpha = residual_at_target.sum(axis=0)      # (d,)
+        cf_dot_residual = float((residual_at_target * cf_at_target).sum())
+        alpha2_sum = float(T)
+        cf_norm2_sum = float((cf_at_target * cf_at_target).sum())
+        a_cf = cf_at_target.sum(axis=0)                      # (d,)
+    else:
+        # k>=1: alpha_perm and cf_perm have nonzeros only at mixed rows
+        # that touched a target slot. Build the full (m,) and (m, d)
+        # vectors then collapse — typical |records_target_hits with hits|
+        # << m, so this is the dominant cost only for very large c.
         alpha_rows = np.zeros(m, dtype=np.float32)
         cf_contrib = np.zeros((m, d), dtype=np.float32)
         for i, hits in enumerate(records_target_hits):
@@ -478,40 +507,23 @@ def lira_score_frame_candidates(
             cf_contrib[i] = acc_v
         alpha_perm = alpha_rows[perm]
         cf_perm = cf_contrib[perm]
-    else:
-        alpha_rows = np.zeros(m, dtype=np.float32)
-        alpha_rows[target_rows] = 1.0
-        cf_contrib = np.zeros_like(UW)
-        cf_contrib[target_rows] = UW[counterfactual_rows]
-        alpha_perm = alpha_rows[perm]
-        cf_perm = cf_contrib[perm]
 
-    # For each candidate r:
-    #   pred_perm[j] = (alpha_perm[j] * UW[r] - cf_perm[j]) / T
-    #   dot = sum_j residual[j] . pred_perm[j]
-    #       = (1/T) * (residual_alpha . UW[r] - sum_j residual[j] . cf_perm[j])
-    # where residual_alpha = sum_j alpha_perm[j] * residual[j].
-    cand_UW = UW[candidate_rows]                # (n_cand, d)
+        residual_alpha = (alpha_perm[:, None] * residual).sum(axis=0)  # (d,)
+        cf_dot_residual = float((residual * cf_perm).sum())
+        alpha2_sum = float((alpha_perm ** 2).sum())
+        cf_norm2_sum = float((cf_perm * cf_perm).sum())
+        a_cf = (alpha_perm[:, None] * cf_perm).sum(axis=0)             # (d,)
 
-    residual_alpha = (alpha_perm[:, None] * residual).sum(axis=0)  # (d,)
-    cf_dot_residual = float((residual * cf_perm).sum())
+    cand_UW = UW[candidate_rows]                                       # (n_cand, d)
+    cand_norm2 = (cand_UW * cand_UW).sum(axis=1)                       # (n_cand,)
+    cross = cand_UW @ a_cf                                             # (n_cand,)
 
     dot_terms = (cand_UW @ residual_alpha) * inv_T - cf_dot_residual * inv_T
-    # ||pred_perm||^2 = sum_j ||(alpha_perm[j] * u_r - cf_perm[j])/T||^2
-    #                = (1/T^2) * sum_j (alpha_perm[j]^2 * ||u_r||^2
-    #                  - 2 alpha_perm[j] * (u_r . cf_perm[j])
-    #                  + ||cf_perm[j]||^2)
-    alpha2_sum = float((alpha_perm ** 2).sum())
-    cf_norm2_sum = float((cf_perm * cf_perm).sum())
-    a_cf = (alpha_perm[:, None] * cf_perm).sum(axis=0)             # (d,)
-    cand_norm2 = (cand_UW * cand_UW).sum(axis=1)                   # (n_cand,)
-    cross = cand_UW @ a_cf                                          # (n_cand,)
     nrm_terms = (
         (alpha2_sum * cand_norm2 - 2.0 * cross + cf_norm2_sum) * (inv_T ** 2)
     )
 
-    scores = (dot_terms - 0.5 * nrm_terms) / (sigma ** 2)
-    return scores
+    return (dot_terms - 0.5 * nrm_terms) / (sigma ** 2)
 
 
 def _lira_score_external_uw(
@@ -528,6 +540,7 @@ def _lira_score_external_uw(
     """
     UW = trial["UW"]
     perm = trial["perm"]
+    inv_perm = trial["inv_perm"]
     coef = trial["coef"]
     m = trial["m"]
     k = trial["k"]
@@ -540,7 +553,17 @@ def _lira_score_external_uw(
     T = len(target_rows)
     inv_T = 1.0 / float(T)
 
-    if k >= 1:
+    if k == 0:
+        target_perm_idx = inv_perm[target_rows]
+        residual_at_target = residual[target_perm_idx]
+        cf_at_target = UW[counterfactual_rows].astype(np.float32)
+
+        residual_alpha = residual_at_target.sum(axis=0)
+        cf_dot_residual = float((residual_at_target * cf_at_target).sum())
+        alpha2_sum = float(T)
+        cf_norm2_sum = float((cf_at_target * cf_at_target).sum())
+        a_cf = cf_at_target.sum(axis=0)
+    else:
         alpha_rows = np.zeros(m, dtype=np.float32)
         cf_contrib = np.zeros((m, d), dtype=np.float32)
         for i, hits in enumerate(records_target_hits):
@@ -555,23 +578,17 @@ def _lira_score_external_uw(
             cf_contrib[i] = acc_v
         alpha_perm = alpha_rows[perm]
         cf_perm = cf_contrib[perm]
-    else:
-        alpha_rows = np.zeros(m, dtype=np.float32)
-        alpha_rows[target_rows] = 1.0
-        cf_contrib = np.zeros_like(UW)
-        cf_contrib[target_rows] = UW[counterfactual_rows]
-        alpha_perm = alpha_rows[perm]
-        cf_perm = cf_contrib[perm]
 
-    residual_alpha = (alpha_perm[:, None] * residual).sum(axis=0)
-    cf_dot_residual = float((residual * cf_perm).sum())
+        residual_alpha = (alpha_perm[:, None] * residual).sum(axis=0)
+        cf_dot_residual = float((residual * cf_perm).sum())
+        alpha2_sum = float((alpha_perm ** 2).sum())
+        cf_norm2_sum = float((cf_perm * cf_perm).sum())
+        a_cf = (alpha_perm[:, None] * cf_perm).sum(axis=0)
 
-    dot_terms = (cand_UW @ residual_alpha) * inv_T - cf_dot_residual * inv_T
-    alpha2_sum = float((alpha_perm ** 2).sum())
-    cf_norm2_sum = float((cf_perm * cf_perm).sum())
-    a_cf = (alpha_perm[:, None] * cf_perm).sum(axis=0)
     cand_norm2 = (cand_UW * cand_UW).sum(axis=1)
     cross = cand_UW @ a_cf
+
+    dot_terms = (cand_UW @ residual_alpha) * inv_T - cf_dot_residual * inv_T
     nrm_terms = (
         (alpha2_sum * cand_norm2 - 2.0 * cross + cf_norm2_sum) * (inv_T ** 2)
     )
@@ -620,26 +637,23 @@ def lemma3_random_baseline_attacks(
         Baseline normalized score = 0.5 * (1 - num_frames/clip_len)
                                     + 1.0 * (num_frames/clip_len).
     Attack 2 (clip inference, top-1): 1 / n_universe_clips.
-    Attack 3 (frame-level MIA, half-integer): per-guess
-        P(exact) = 1 / (n_universe_clips * clip_len)
-        P(same-clip, not exact) = (num_frames * (clip_len - 1))
-                                  / (n_universe_clips * clip_len * clip_len)
-                                  ~ 1 / n_universe_clips for clip_len >> 1
-        Per-guess score ~ 0.5 / n_universe_clips, dominated by the
-        same-clip half-credit term.
+    Attack 3 (frame-level MIA, half-integer): truth set has T = num_frames
+        (clip, index) pairs, all in one clip. For one uniformly random
+        guess over the n_universe_clips * clip_len candidate-pair space:
+            P(exact) = T / (n_universe_clips * clip_len)
+            P(same-clip, not exact) = (clip_len - T) / (n_universe_clips * clip_len)
+        Per-guess expected score = 1 * P(exact) + 0.5 * P(same-clip-not-exact),
+        dominated by the half-credit term for clip_len >> T.
     """
     p_exact = num_frames / clip_len
     a1_per_guess = 0.5 * (1.0 - p_exact) + 1.0 * p_exact
 
     a2_top1 = 1.0 / max(1, n_universe_clips)
 
-    a3_p_exact = 1.0 / (n_universe_clips * clip_len)
+    a3_p_exact = num_frames / (n_universe_clips * clip_len)
     a3_p_same_clip_only = (
-        (clip_len - 1.0) / (n_universe_clips * clip_len)
+        (clip_len - num_frames) / (n_universe_clips * clip_len)
     )
-    # adversary emits one (clip, idx) per guess uniformly at random over
-    # the n_universe_clips * clip_len candidate space; per-guess expected
-    # score is dominated by the half-credit same-clip term
     a3_per_guess = 1.0 * a3_p_exact + 0.5 * a3_p_same_clip_only
 
     return {
@@ -743,6 +757,7 @@ def run_attack(
 
     a1_scores, a1_int_scores = [], []
     a2_scores = []
+    a2_actual_n_candidates = []   # may be < n_clip_candidates for sparse classes
     a3_scores, a3_int_scores = [], []
 
     print(
@@ -770,6 +785,7 @@ def run_attack(
             axis=0,
         )
         true_target_index_among_candidates = len(candidate_clip_ids) - 1
+        a2_actual_n_candidates.append(len(candidate_clip_ids))
 
         truth = list(zip(
             np.full(num_frames, target_vid, dtype=int).tolist(),
@@ -890,13 +906,21 @@ def run_attack(
     a3_int_norm = float(a3_int.mean() / num_frames) if len(a3_int) else float("nan")
     a3_int_std  = float(a3_int.std()  / num_frames) if len(a3_int) else float("nan")
 
-    a2_baseline_topN = 1.0 / max(1, n_clip_candidates)
+    # Use the *actual* mean candidate count for the baseline. With
+    # ~75 clips/class on UCF-101 this matches n_clip_candidates exactly,
+    # but small classes (e.g. when filter_long_clips trimmed a class hard)
+    # cap below n_clip_candidates and the baseline shifts accordingly.
+    a2_actual_mean = (
+        float(np.mean(a2_actual_n_candidates))
+        if a2_actual_n_candidates else float(n_clip_candidates)
+    )
+    a2_baseline_topN = 1.0 / max(1.0, a2_actual_mean)
 
     print(f"\n--- Attack Results (k={k}, sigma={sigma}) ---")
     print(f"Attack 1 (index inference, half) : {a1_norm:.4f}   "
           f"(baseline {base['attack1_per_guess']:.4f})")
     print(f"Attack 2 (clip inference, top-1) : {a2_norm:.4f}   "
-          f"(baseline {a2_baseline_topN:.4f}, |cands|={n_clip_candidates})")
+          f"(baseline {a2_baseline_topN:.4f}, |cands|~{a2_actual_mean:.1f})")
     print(f"Attack 3 (frame-level MIA, half) : {a3_norm:.4f}   "
           f"(baseline {base['attack3_per_guess']:.6f})")
     print(f"Attack 3 (frame-level MIA, int)  : {a3_int_norm:.4f}")
@@ -920,6 +944,7 @@ def run_attack(
         "attack2_top1":            a2_norm,
         "attack2_top1_std":        a2_std,
         "attack2_baseline":        a2_baseline_topN,
+        "attack2_actual_n_candidates": a2_actual_mean,
         # Attack 3
         "attack3_score_half":      a3_norm,
         "attack3_score_half_std":  a3_std,

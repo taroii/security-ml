@@ -93,8 +93,14 @@ def make_figure(joined: pd.DataFrame, save_path: str):
 
     # privacy floor: when adversary perfectly recovers, score = 1, privacy = 0.
     # The closed-form random-guess privacy ceiling is 1 - random_baseline.
-    if "attack3_baseline_half" in joined.columns:
-        rand_priv = 1.0 - joined["attack3_baseline_half"].mean()
+    # Re-derive the baseline from CSV metadata (n_universe_clips, clip_len,
+    # num_frames) to dodge the off-by-T bug present in older CSVs.
+    if {"n_universe_clips", "clip_len", "num_frames"}.issubset(joined.columns):
+        n_clips = float(joined["n_universe_clips"].iloc[0])
+        clip_len = float(joined["clip_len"].iloc[0])
+        T = float(joined["num_frames"].iloc[0])
+        rand_baseline = T / (n_clips * clip_len) + 0.5 * (clip_len - T) / (n_clips * clip_len)
+        rand_priv = 1.0 - rand_baseline
         ax.axhline(
             y=rand_priv, color="dimgray", linestyle="--", linewidth=1.0,
         )

@@ -24,14 +24,33 @@ def _style_ax(ax, xlabel, ylabel, title):
     ax.spines["right"].set_visible(False)
 
 
+def _attack3_baseline(df):
+    """Re-derive the Attack-3 closed-form baseline from CSV metadata so old
+    CSVs (which carried an off-by-T baseline value in the column) still
+    plot correct reference lines.
+    """
+    n_clips = float(df["n_universe_clips"].iloc[0])
+    clip_len = float(df["clip_len"].iloc[0])
+    T = float(df["num_frames"].iloc[0])
+    p_exact = T / (n_clips * clip_len)
+    p_same_only = (clip_len - T) / (n_clips * clip_len)
+    return p_exact + 0.5 * p_same_only
+
+
 def _plot_attack_panel(ax, df, score_col, std_col, baseline_col,
-                       title, ylabel, ylim=None, log_baseline=False):
+                       title, ylabel, ylim=None, log_baseline=False,
+                       baseline_override=None):
     """Generic per-attack panel: one curve per k, plus chance baseline."""
     for k in sorted(df["k"].unique()):
         sub = df[df["k"] == k].sort_values("sigma")
         color, marker, ls = K_STYLE.get(k, ("gray", "o", "-"))
+        # SE of the mean. attack*_std was computed across all
+        # n_targets * n_trials per-(target, trial) draws, so divide by
+        # sqrt(n_targets * n_trials) — not just sqrt(n_targets).
         n_t = sub["n_targets"].iloc[0]
-        se = sub[std_col] / np.sqrt(n_t)
+        n_tr = sub["n_trials"].iloc[0] if "n_trials" in sub.columns else 1
+        n_eff = max(1, int(n_t) * int(n_tr))
+        se = sub[std_col] / np.sqrt(n_eff)
 
         ax.errorbar(
             sub["sigma"], sub[score_col],
@@ -41,8 +60,13 @@ def _plot_attack_panel(ax, df, score_col, std_col, baseline_col,
             label=f"$k = {k}$",
         )
 
-    if baseline_col in df.columns:
+    if baseline_override is not None:
+        baseline = baseline_override
+    elif baseline_col in df.columns:
         baseline = df[baseline_col].mean()
+    else:
+        baseline = None
+    if baseline is not None:
         ax.axhline(
             y=baseline, color="dimgray", linestyle=":", linewidth=1.5,
             label=f"Random baseline ({baseline:.4f})",
@@ -95,6 +119,7 @@ def make_figure(df: pd.DataFrame, save_path: str):
         title="(c) Frame-level Membership Inference",
         ylabel=r"Half-integer score (whole universe)",
         ylim=(-0.02, 1.05),
+        baseline_override=_attack3_baseline(df),
     )
 
     plt.tight_layout()
