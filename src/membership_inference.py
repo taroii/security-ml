@@ -749,7 +749,6 @@ if __name__ == "__main__":
         f"After CLIP_LEN={CLIP_LEN} filter: kept {len(train_list)}, "
         f"dropped {dropped}"
     )
-    c = 101
 
     print("\nBuilding frame pool...")
     U, labels, frame_indices, clip_ids, clip_paths = build_frame_pool(
@@ -762,6 +761,19 @@ if __name__ == "__main__":
         clip_len=CLIP_LEN,
     )
     print(f"U shape: {U.shape}, n_clips_in_universe: {len(clip_paths)}")
+
+    # Some UCF-101 classes can lose all their training clips to the
+    # CLIP_LEN filter; class_k_mix_records would then sample an empty
+    # class. Remap labels to dense [0, c) over surviving classes.
+    present = np.unique(labels)
+    if len(present) < 101:
+        print(
+            f"[warn] {101 - len(present)} class(es) have no surviving "
+            f"training clips after CLIP_LEN={CLIP_LEN}; remapping labels "
+            f"to dense [0, {len(present)})."
+        )
+    labels = np.searchsorted(present, labels).astype(int)
+    c = int(len(present))
 
     os.makedirs(args.results_dir, exist_ok=True)
 

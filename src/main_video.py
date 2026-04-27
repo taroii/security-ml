@@ -24,7 +24,7 @@ from torchvision.models import resnet18, ResNet18_Weights
 # Common trimming length: clips with fewer than CLIP_LEN frames are dropped
 # from the dataset; longer clips are truncated to their first CLIP_LEN frames.
 # Both downstream and MIA pipelines must agree on this constant.
-CLIP_LEN = 200
+CLIP_LEN = 100
 
 
 
