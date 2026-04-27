@@ -222,4 +222,4 @@ ucf101_r3d18_embed.pt
 !accuracy_results/*.csv
 *.md
 logs/
-attack_results_10_trials/
+attack_results_10_trials/cache/

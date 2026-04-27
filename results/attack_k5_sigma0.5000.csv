@@ -1,2 +1,2 @@
-k,sigma,n_targets,n_trials,h_plus_win_rate,h_plus_win_se,score_half,score_int,score_half_std,score_int_std,always_h_plus_half,always_h_plus_int,random_baseline_half,random_baseline_int,mean_delta,std_delta
-5,0.500000,50,10,0.520000,0.070654,0.629375,0.588750,0.389562,0.431583,1.000000,1.000000,0.000309,0.000105,-24090.149499,1801329.584853
+k,sigma,n_targets,n_trials,n_universe_clips,n_universe_frames,clip_len,num_frames,attack1_score_half,attack1_score_half_std,attack1_baseline_half,attack2_top1,attack2_top1_std,attack2_baseline,attack3_score_half,attack3_score_half_std,attack3_score_int,attack3_score_int_std,attack3_baseline_half
+5,0.500000,50,10,7954,127264,100,16,0.575255,0.045491,0.580000,0.000000,0.000000,0.000126,0.000000,0.000000,0.000000,0.000000,0.000063
