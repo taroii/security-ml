@@ -14,11 +14,16 @@ K_STYLE = {
     5: ("#1f77b4", "^", "-."),
 }
 
-# map sigma -> marker size (points).  Small sigma -> small marker.
+
+# map sigma -> marker size (points). Small sigma -> small marker.
 def sigma_to_size(sigma: float) -> float:
-    # linear map; tune endpoints here if needed
     size_map = {0.01: 6, 0.05: 10, 0.10: 14, 0.50: 20}
     return size_map.get(round(sigma, 2), 10)
+
+
+# Privacy axis: 1 - Attack 3 (frame-level membership inference, half-integer).
+# Higher = more private. Utility axis: random-sampling downstream accuracy.
+PRIVACY_SCORE_COL = "attack3_score_half"
 
 
 def load_and_join(accuracy_path: str, mia_path: str) -> pd.DataFrame:
@@ -55,21 +60,18 @@ def make_figure(joined: pd.DataFrame, save_path: str):
     fig, ax = plt.subplots(figsize=(9, 5.5))
 
     joined = joined.copy()
-    joined["privacy"] = 1.0 - joined["score_half"]
+    joined["privacy"] = 1.0 - joined[PRIVACY_SCORE_COL]
 
-    # draw lines per k, and markers sized by sigma
     for k in sorted(joined["k"].unique()):
         sub = joined[joined["k"] == k].sort_values("sigma")
         color, marker, ls = K_STYLE.get(k, ("gray", "o", "-"))
 
-        # connecting line (sigma-ordered)
         ax.plot(
             sub["accuracy_obfuscated"], sub["privacy"],
             color=color, linestyle=ls, linewidth=1.5,
             alpha=0.6, zorder=1,
         )
 
-        # markers: size encodes sigma
         sizes = [sigma_to_size(s) ** 2 for s in sub["sigma"]]
         ax.scatter(
             sub["accuracy_obfuscated"], sub["privacy"],
@@ -78,7 +80,6 @@ def make_figure(joined: pd.DataFrame, save_path: str):
             zorder=3,
         )
 
-    # reference lines
     if "accuracy_baseline" in joined.columns:
         baseline_acc = joined["accuracy_baseline"].iloc[0]
         ax.axvline(
@@ -90,21 +91,24 @@ def make_figure(joined: pd.DataFrame, save_path: str):
             fontsize=9, color="black", va="top",
         )
 
-    always_h_plus = joined["always_h_plus_half"].mean()
-    privacy_floor = 1.0 - always_h_plus
-    ax.axhline(
-        y=privacy_floor,
-        color="dimgray", linestyle="--", linewidth=1.0,
-    )
-    ax.text(
-        ax.get_xlim()[0] if ax.get_xlim()[0] else 40,
-        privacy_floor, f" always-$H^+$ floor ({privacy_floor:.2f})",
-        fontsize=9, color="dimgray", va="bottom",
-    )
+    # privacy floor: when adversary perfectly recovers, score = 1, privacy = 0.
+    # The closed-form random-guess privacy ceiling is 1 - random_baseline.
+    if "attack3_baseline_half" in joined.columns:
+        rand_priv = 1.0 - joined["attack3_baseline_half"].mean()
+        ax.axhline(
+            y=rand_priv, color="dimgray", linestyle="--", linewidth=1.0,
+        )
+        ax.text(
+            ax.get_xlim()[0] if ax.get_xlim()[0] else 40,
+            rand_priv, f" random-guess privacy ({rand_priv:.4f})",
+            fontsize=9, color="dimgray", va="bottom",
+        )
 
     ax.set_xlabel("Test accuracy (%)", fontsize=12)
-    ax.set_ylabel(r"Privacy: $1 - \mathrm{normalized\ adversary\ score}$",
-                  fontsize=12)
+    ax.set_ylabel(
+        r"Privacy: $1 - \mathrm{Attack\,3\ half\text{-}integer\ score}$",
+        fontsize=12,
+    )
     ax.grid(True, alpha=0.3)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -154,7 +158,7 @@ if __name__ == "__main__":
 
     joined = load_and_join(args.accuracy, args.mia)
     print(f"Joined {len(joined)} (k, sigma) cells")
-    print(joined[["k", "sigma", "accuracy_obfuscated", "score_half"]].to_string(
+    print(joined[["k", "sigma", "accuracy_obfuscated", PRIVACY_SCORE_COL]].to_string(
         index=False, float_format=lambda x: f"{x:.4f}"
     ))
 

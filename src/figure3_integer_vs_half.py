@@ -23,16 +23,26 @@ def _style_ax(ax, xlabel, ylabel, title):
     ax.spines["right"].set_visible(False)
 
 
+# Figure 3 applies the integer-vs-half-integer comparison to Attack 3
+# (frame-level membership inference) only. Attack 1 has no cross-clip
+# ambiguity (clip is given, all guesses are same-clip). Attack 2 is
+# binary top-1 with no half-credit.
+COL_INT  = "attack3_score_int"
+COL_HALF = "attack3_score_half"
+STD_INT  = "attack3_score_int_std"
+STD_HALF = "attack3_score_half_std"
+
+
 def plot_panel(ax, df_k: pd.DataFrame, k: int, show_ylabel: bool):
-    """One panel for a single k value: integer vs half-integer score."""
+    """One panel for a single k value: Attack 3 integer vs half-integer."""
     sub = df_k.sort_values("sigma")
     n_t = sub["n_targets"].iloc[0]
 
-    for rule in ("int", "half"):
+    for rule, score_col, std_col in (
+        ("int",  COL_INT,  STD_INT),
+        ("half", COL_HALF, STD_HALF),
+    ):
         color, marker, ls, label = RULE_STYLE[rule]
-        score_col = f"score_{rule}"
-        std_col = f"score_{rule}_std"
-
         se = sub[std_col] / np.sqrt(n_t)
 
         ax.errorbar(
@@ -47,7 +57,7 @@ def plot_panel(ax, df_k: pd.DataFrame, k: int, show_ylabel: bool):
     _style_ax(
         ax,
         xlabel=r"Noise level $\sigma$ (log scale)",
-        ylabel=r"Normalized adversary score" if show_ylabel else "",
+        ylabel=(r"Frame-level MIA score (Attack 3)" if show_ylabel else ""),
         title=f"$k = {k}$",
     )
 
@@ -64,9 +74,8 @@ def make_figure(df: pd.DataFrame, save_path: str):
     if n_panels == 1:
         axes = [axes]
 
-    # shared y-limits: pad data range symmetrically, clamped to [0, 1.05]
-    ymin = min(df["score_int"].min(), df["score_half"].min())
-    ymax = max(df["score_int"].max(), df["score_half"].max())
+    ymin = min(df[COL_INT].min(), df[COL_HALF].min())
+    ymax = max(df[COL_INT].max(), df[COL_HALF].max())
     pad = 0.5 * (ymax - ymin)
     yrange = (max(0.0, ymin - pad), min(1.05, ymax + pad))
 
@@ -75,7 +84,6 @@ def make_figure(df: pd.DataFrame, save_path: str):
         plot_panel(ax, df_k, k, show_ylabel=(k == ks[0]))
         ax.set_ylim(yrange)
 
-    # one legend for the whole figure
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(
         handles, labels,
@@ -105,8 +113,8 @@ if __name__ == "__main__":
     print(f"k values:     {sorted(df['k'].unique())}")
     print(f"sigma values: {sorted(df['sigma'].unique())}")
     print()
-    print("Per-cell score comparison:")
-    print(df[["k", "sigma", "score_int", "score_half"]].to_string(
+    print("Per-cell Attack-3 score comparison:")
+    print(df[["k", "sigma", COL_INT, COL_HALF]].to_string(
         index=False, float_format=lambda x: f"{x:.4f}"
     ))
 

@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -11,9 +11,11 @@ from main_video import (
     set_seed,
     get_device,
     parse_ucf101_split,
-    download_ucf101,        # add this
+    download_ucf101,
+    filter_long_clips,
+    _long_clips_cache_path,
+    CLIP_LEN,  # common trimming length, single source of truth
 )
-
 
 
 # Frame loading: grayscale, no embedding model
@@ -22,84 +24,93 @@ def load_video_frames_gray(
     num_frames: int = 16,
     size:       int = 112,
     rng:        np.random.Generator = None,
-) -> Tuple[np.ndarray, np.ndarray, int]:
+    clip_len:   int = CLIP_LEN,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Load a video, randomly sample num_frames without loading all frames
-    into memory. Uses cv2 seeking to read only the selected frames.
+    Load num_frames random indices from [0, clip_len) of the clip.
+    Caller must ensure the clip has at least clip_len frames (use
+    filter_long_clips upstream). Returns (frames, indices).
+        frames: (num_frames, clip_len_pixels)  flat float32 in [0, 1]
+        indices: (num_frames,) int sorted
     """
     if rng is None:
         rng = np.random.default_rng()
+
+    indices = np.sort(
+        rng.choice(clip_len, size=num_frames, replace=False)
+    ).astype(int)
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {path}")
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    sampled = [None] * num_frames
+    next_target = 0
+    cur = 0
+    while next_target < num_frames:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if cur == int(indices[next_target]):
+            sampled[next_target] = frame
+            next_target += 1
+        cur += 1
+        if cur >= clip_len:
+            break
+    cap.release()
 
-    if total_frames <= 0:
-        frames_buf = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frames_buf.append(frame)
-        cap.release()
-        total_frames = len(frames_buf)
-        if total_frames == 0:
-            raise RuntimeError(f"No frames read from: {path}")
-        replace = total_frames < num_frames
-        frame_indices = np.sort(
-            rng.choice(total_frames, size=num_frames, replace=replace)
-        ).astype(int)
-        sampled = [frames_buf[i] for i in frame_indices]
-    else:
-        cap.release()
-        replace = total_frames < num_frames
-        frame_indices = np.sort(
-            rng.choice(total_frames, size=num_frames, replace=replace)
-        ).astype(int)
+    if next_target < num_frames:
+        raise RuntimeError(
+            f"Only read {next_target}/{num_frames} frames from {path} "
+            f"(clip shorter than CLIP_LEN={clip_len}?)"
+        )
 
-        cap = cv2.VideoCapture(path)
-        sampled = []
-        for idx in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-            if not ret:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, idx - 1))
-                ret, frame = cap.read()
-            if ret:
-                sampled.append(frame)
-        cap.release()
-
-        if len(sampled) == 0:
-            raise RuntimeError(f"No frames read from: {path}")
-
-        while len(sampled) < num_frames:
-            sampled.append(sampled[-1])
-
-    result = []
-    for frame in sampled:
+    out = np.empty((num_frames, size * size), dtype=np.float32)
+    for t, frame in enumerate(sampled):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.resize(gray, (size, size))
-        result.append(gray)
-
-    stack = np.stack(result, axis=0)
-    T, H, W = stack.shape
-    frames = stack.reshape(T, H * W).astype(np.float32) / 255.0
-
-    return frames, frame_indices, total_frames
+        out[t] = gray.astype(np.float32).reshape(-1) / 255.0
+    return out, indices
 
 
+def load_full_clip_gray(
+    path:     str,
+    clip_len: int = CLIP_LEN,
+    size:     int = 112,
+) -> np.ndarray:
+    """
+    Read the first clip_len frames of a clip as flat-grayscale (clip_len, size*size).
+    Used by Attack 1 (index inference) where the adversary ranks all
+    indices in [0, clip_len) by per-candidate likelihood.
+    Returns None if clip is shorter than clip_len.
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return None
+    out = np.empty((clip_len, size * size), dtype=np.float32)
+    for i in range(clip_len):
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            return None
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, (size, size))
+        out[i] = gray.astype(np.float32).reshape(-1) / 255.0
+    cap.release()
+    return out
 
-# Build frame pool U
+
+# Build frame pool U over the trimmed dataset. Per-clip rng is seeded
+# deterministically so the universe is reproducible from (clip_idx, seed).
 def build_frame_pool(
     video_root: str,
     train_list: List[Tuple[str, int]],
     cache_path: str,
     num_frames: int = 16,
-    size: int = 112,
-    seed: int = 0,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    size:       int = 112,
+    seed:       int = 0,
+    clip_len:   int = CLIP_LEN,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
     if os.path.exists(cache_path):
         obj = np.load(cache_path, allow_pickle=True)
         print(f"Loaded frame pool from cache: {cache_path}")
@@ -108,18 +119,21 @@ def build_frame_pool(
             obj["labels"],
             obj["frame_indices"],
             obj["clip_ids"],
-            obj["clip_lengths"],
+            list(obj["clip_paths"]),
         )
 
-    U_list, labels_list, fidx_list, cid_list, clen_list = [], [], [], [], []
-    pool_rng = np.random.default_rng(seed)
+    U_list, labels_list, fidx_list, cid_list, paths_list = [], [], [], [], []
 
     for clip_id, (rel_path, label) in enumerate(train_list):
         video_path = os.path.join(video_root, rel_path)
+        # Per-clip rng deterministic in (clip_id, seed) — required for the
+        # cache-validity invariant: the universe must be identical across
+        # candidate evaluations within a trial.
+        clip_rng = np.random.default_rng(seed * (1 << 20) + clip_id)
         try:
-            clip_rng = np.random.default_rng(pool_rng.integers(1 << 62))
-            frames, fidxs, total = load_video_frames_gray(
-                video_path, num_frames=num_frames, size=size, rng=clip_rng
+            frames, fidxs = load_video_frames_gray(
+                video_path, num_frames=num_frames, size=size,
+                rng=clip_rng, clip_len=clip_len,
             )
         except RuntimeError as e:
             print(f"  Skipping {rel_path}: {e}")
@@ -130,7 +144,7 @@ def build_frame_pool(
         labels_list.append(np.full(T, label, dtype=int))
         fidx_list.append(fidxs)
         cid_list.append(np.full(T, clip_id, dtype=int))
-        clen_list.append(total)
+        paths_list.append(rel_path)
 
         if (clip_id + 1) % 200 == 0:
             print(f"  Loaded {clip_id + 1}/{len(train_list)} videos")
@@ -139,71 +153,71 @@ def build_frame_pool(
     labels = np.concatenate(labels_list, axis=0)
     frame_indices = np.concatenate(fidx_list, axis=0)
     clip_ids = np.concatenate(cid_list, axis=0)
-    clip_lengths = np.array(clen_list, dtype=int)
+    clip_paths = np.array(paths_list, dtype=object)
 
     np.savez(
         cache_path,
         U=U, labels=labels, frame_indices=frame_indices,
-        clip_ids=clip_ids, clip_lengths=clip_lengths,
+        clip_ids=clip_ids, clip_paths=clip_paths,
     )
     print(f"Frame pool cached to {cache_path}")
-    print(f"Total frames: {U.shape[0]}, d0={U.shape[1]}")
-    return U, labels, frame_indices, clip_ids, clip_lengths
-
+    print(f"Total frames: {U.shape[0]}, d0={U.shape[1]}, n_clips={len(paths_list)}")
+    return U, labels, frame_indices, clip_ids, paths_list
 
 
 # Mechanism: with or without mixing
-def class_k_mix(
-    X: np.ndarray,
+# We expose the M_mix as explicit row-selection records so the
+# linearity-of-mechanism amortization in run_attack can identify which
+# mixed rows touch the target's universe rows.
+def class_k_mix_records(
     labels: np.ndarray,
-    c: int,
-    k: int,
-    rng: np.random.Generator,
-) -> np.ndarray:
+    c:      int,
+    k:      int,
+    rng:    np.random.Generator,
+) -> List[np.ndarray]:
     """
-    Class-k mixing at the individual frame level.
-    For each ordered pair (i, j) in [c] x [c], sample k frames from
-    class i and k from class j, average them -> one mixed frame.
-
-    Requires k >= 1. For no mixing (k=0), apply_mechanism handles that
-    branch directly without calling this function.
+    Build the row-selection records for the class-k mixing matrix M_mix.
+    Returns a list of length c*c, each entry a (2k,) array of universe
+    indices selected for that mixed row. Mixed-row i averages frames at
+    those indices with weight 1/(2k) each.
     """
-    assert k >= 1, "class_k_mix requires k >= 1; k=0 is handled in apply_mechanism"
-    d0 = X.shape[1]
-    m = c * c
-    Xm = np.zeros((m, d0), dtype=np.float32)
+    assert k >= 1, "class_k_mix_records requires k >= 1"
     cls_to_idx = [np.where(labels == cls)[0] for cls in range(c)]
-
-    t = 0
+    records = []
     for i in range(c):
         for j in range(c):
             idx_i = rng.choice(cls_to_idx[i], size=k, replace=True)
             idx_j = rng.choice(cls_to_idx[j], size=k, replace=True)
-            Xm[t] = X[np.concatenate([idx_i, idx_j])].mean(axis=0)
-            t += 1
-    return Xm
+            records.append(np.concatenate([idx_i, idx_j]))
+    return records
 
 
 def apply_mechanism(
-    U: np.ndarray,
+    U:      np.ndarray,
     labels: np.ndarray,
-    c: int,
-    k: int,
-    d: int,
-    sigma: float,
-    rng: np.random.Generator,
+    c:      int,
+    k:      int,
+    d:      int,
+    sigma:  float,
+    rng:    np.random.Generator,
 ) -> np.ndarray:
     """
-    Apply the obfuscation T_X(X) = Pi1 [M] X W + B.
+    Naive (non-amortized) reference implementation of T_X(X) = Pi1 [M] X W + B.
+    Used to seed the cached observation o (computed once per cell), to
+    validate the amortized path in tests, and as a fallback.
 
-    For k >= 1: mixing is applied via class_k_mix; output shape (c^2, d).
-    For k == 0: no mixing; output shape (N_total, d) -- each row is one
-                original frame after permutation, projection, and noise.
+    For k >= 1: shape (c^2, d). For k == 0: shape (N_total, d).
     """
     if k >= 1:
-        Xm = class_k_mix(U, labels, c, k, rng)
+        records = class_k_mix_records(labels, c, k, rng)
+        m = c * c
+        d0 = U.shape[1]
+        Xm = np.empty((m, d0), dtype=np.float32)
+        coef = 1.0 / (2.0 * k)
+        for i, sel in enumerate(records):
+            Xm[i] = U[sel].sum(axis=0) * coef
     else:
-        Xm = U  # k=0: no mixing, operate on raw frame pool
+        Xm = U
 
     m, d0 = Xm.shape
     W = rng.standard_normal((d0, d)).astype(np.float32) / np.sqrt(d)
@@ -212,86 +226,222 @@ def apply_mechanism(
     return Xm[perm] @ W + B
 
 
+# Linearity-of-mechanism amortization
+#
+# T_X(X) = Pi_1 M_mix X W + B is linear in X up to the additive noise B.
+# Decompose X = X_base + Delta where X_base zeros out the target's T rows
+# and Delta is supported only on those T rows. Then
+#     T_X(X) = (Pi_1 M_mix X_base W + B) + Pi_1 M_mix Delta W
+#            = o_base + Pi_1 (M_mix Delta) W
+# For a candidate hypothesis "all T target rows = r" (a single d0 vector):
+#     M_mix Delta_r [i] = (sum_{tr in target} M_mix[i, tr]) * r = alpha[i] * r
+# so Pi_1 (M_mix Delta_r) W = alpha_perm * (r W)^T  (rank-1 in (m, d)).
+#
+# This makes per-candidate likelihood a few O(d) ops once W has been
+# applied to the candidate batch, so whole-universe ranking is feasible.
+def precompute_trial(
+    U:      np.ndarray,
+    labels: np.ndarray,
+    c:      int,
+    k:      int,
+    d:      int,
+    sigma:  float,
+    rng:    np.random.Generator,
+) -> Dict:
+    """
+    Sample (W, B, perm, M_mix) once for this MC trial; precompute UW and
+    a partial obfuscation o_full that omits the per-target zeroing. All
+    per-target work later only adjusts for the target rows.
+    """
+    N_total, d0 = U.shape
 
-# Weighted scoring
+    if k >= 1:
+        records = class_k_mix_records(labels, c, k, rng)
+        m = c * c
+        coef = 1.0 / (2.0 * k)
+    else:
+        records = None
+        m = N_total
+        coef = None  # not used
+
+    perm = rng.permutation(m)
+    inv_perm = np.empty_like(perm)
+    inv_perm[perm] = np.arange(m)
+
+    W = rng.standard_normal((d0, d)).astype(np.float32) / np.sqrt(d)
+    B = rng.standard_normal((m, d)).astype(np.float32) * sigma
+
+    UW = U @ W   # (N_total, d): the dominant per-trial cost
+
+    if k >= 1:
+        Xm_full_W = np.empty((m, d), dtype=np.float32)
+        for i, sel in enumerate(records):
+            Xm_full_W[i] = UW[sel].sum(axis=0) * coef
+    else:
+        Xm_full_W = UW
+
+    o_full = Xm_full_W[perm] + B
+
+    return {
+        "UW": UW, "W": W, "B": B, "perm": perm, "inv_perm": inv_perm,
+        "records": records, "coef": coef, "m": m, "k": k, "c": c,
+        "sigma": sigma, "Xm_full_W": Xm_full_W, "o_full": o_full,
+    }
+
+
+def precompute_target(trial: Dict, target_rows: np.ndarray) -> Dict:
+    """
+    Per-(trial, target) precompute: subtract the target rows' contribution
+    out of o_full to obtain o_base, and build the alpha vector recording
+    target-row presence in each mixed row.
+    """
+    UW = trial["UW"]
+    perm = trial["perm"]
+    inv_perm = trial["inv_perm"]
+    records = trial["records"]
+    coef = trial["coef"]
+    m = trial["m"]
+    k = trial["k"]
+    o_full = trial["o_full"]
+    d = UW.shape[1]
+
+    target_rows = np.asarray(target_rows, dtype=int)
+    target_set = set(int(t) for t in target_rows.tolist())
+
+    if k >= 1:
+        alpha = np.zeros(m, dtype=np.float32)
+        beta_W = np.zeros((m, d), dtype=np.float32)
+        for i, sel in enumerate(records):
+            mask = np.isin(sel, target_rows)
+            count = int(mask.sum())
+            if count > 0:
+                alpha[i] = count * coef
+                # contributions from target rows to mixed row i (handles
+                # repeated target indices via summation)
+                beta_W[i] = UW[sel[mask]].sum(axis=0) * coef
+    else:
+        alpha = np.zeros(m, dtype=np.float32)
+        alpha[target_rows] = 1.0
+        beta_W = np.zeros_like(UW)
+        beta_W[target_rows] = UW[target_rows]
+
+    o_base = o_full - beta_W[perm]
+    alpha_perm = alpha[perm]
+
+    return {
+        "o_base":      o_base,
+        "alpha_perm":  alpha_perm,
+        "alpha_norm2": float(alpha_perm @ alpha_perm),
+        "target_rows": target_rows,
+    }
+
+
+def candidate_scores(
+    o:           np.ndarray,
+    candidates_W: np.ndarray,
+    target_pre:  Dict,
+    sigma:       float,
+) -> np.ndarray:
+    """
+    Per-candidate likelihood-ranking score under the hypothesis
+    "target's T rows are all r" for candidate r. Higher = more likely.
+
+    Drops constants (||e||^2 / 2sigma^2 in particular) since only ranks
+    matter. candidates_W must equal candidates @ trial["W"] for the same
+    trial that produced target_pre.
+    """
+    o_base      = target_pre["o_base"]
+    alpha_perm  = target_pre["alpha_perm"]
+    alpha_norm2 = target_pre["alpha_norm2"]
+
+    e = o - o_base                              # (m, d)
+    z = alpha_perm @ e                          # (d,)
+    # score(r) = z . v - 0.5 * ||alpha_perm||^2 * ||v||^2,  v = r W
+    scores = candidates_W @ z - 0.5 * alpha_norm2 * (candidates_W ** 2).sum(axis=1)
+    return scores / (sigma ** 2)
+
+
+# Weighted scoring on (clip, index) pairs (no proximity window)
 def compute_weighted_score(
-    guessed_indices: np.ndarray,
-    true_indices: np.ndarray,
-    clip_length: int,
+    guesses:     List[Tuple[int, int]],
+    truth:       List[Tuple[int, int]],
     weight_rule: str = "half",
-    window_frac: float = 0.01,
 ) -> float:
     """
-    Weighted overlap between guessed and true frame indices.
-
-    weight_rule:
-      "half"    : w=1 if exact, w=1/2 if dist <= 0.05*clip_length, else 0
-      "integer" : w=1 if exact, else 0  (binary baseline)
+    Score a guess set against the ground-truth set under the
+    half-integer rule on (clip, index) pairs:
+        exact (clip, index) match -> 1
+        same clip, any index      -> 0.5  (only when rule == "half")
+        different clip            -> 0
     """
-    window = window_frac * clip_length
+    truth_set = set((int(c), int(i)) for c, i in truth)
+    truth_clips = set(c for c, _ in truth_set)
     total = 0.0
-    for g in guessed_indices:
-        min_dist = np.abs(true_indices - g).min()
-        if min_dist == 0:
+    for c_hat, i_hat in guesses:
+        key = (int(c_hat), int(i_hat))
+        if key in truth_set:
             total += 1.0
-        elif weight_rule == "half" and min_dist <= window:
+        elif weight_rule == "half" and int(c_hat) in truth_clips:
             total += 0.5
     return total
 
 
-def lemma3_random_baseline(
-    num_frames: int,
-    clip_length: int,
-    N_total: int,
-    weight_rule: str = "half",
-    window_frac: float = 0.01,
-) -> float:
+# Closed-form random-guess baselines for the three attacks
+def lemma3_random_baseline_attacks(
+    n_universe_clips: int,
+    num_frames:       int,
+    clip_len:         int = CLIP_LEN,
+) -> Dict[str, float]:
     """
-    Analytical random baseline per Lemma 3 / Lemma 2 (integer case),
-    normalized to [0, 1].
+    Closed-form per-guess baselines for the three temporal MIA attacks
+    under the half-integer rule. Universe is n_universe_clips clips,
+    each contributing num_frames random sampled indices in [0, clip_len).
 
-    For half-integer weights:
-      Approximate per-clip universe partition relative to the n=num_frames
-      true frames: |A|=num_frames exact-match, |B| ~ 2*window*num_frames
-      half-weight neighbours (capped at clip_length - num_frames).
-      baseline = (|A| + |B|/2) / N_total
-
-    For integer weights: baseline = num_frames / N_total.
+    Attack 1 (index inference, clip given): every guess is same-clip,
+        score >= 0.5. Exact-match probability is num_frames / clip_len.
+        Baseline normalized score = 0.5 * (1 - num_frames/clip_len)
+                                    + 1.0 * (num_frames/clip_len).
+    Attack 2 (clip inference, top-1): 1 / n_universe_clips.
+    Attack 3 (frame-level MIA, half-integer): per-guess
+        P(exact) = 1 / (n_universe_clips * clip_len)
+        P(same-clip, not exact) = (num_frames * (clip_len - 1))
+                                  / (n_universe_clips * clip_len * clip_len)
+                                  ~ 1 / n_universe_clips for clip_len >> 1
+        Per-guess score ~ 0.5 / n_universe_clips, dominated by the
+        same-clip half-credit term.
     """
-    if weight_rule == "integer":
-        return float(num_frames) / float(N_total)
+    p_exact = num_frames / clip_len
+    a1_per_guess = 0.5 * (1.0 - p_exact) + 1.0 * p_exact
 
-    window = window_frac * clip_length
-    half_per_true = min(2.0 * window, max(0, clip_length - 1))
-    m_half = min(num_frames * half_per_true, max(0, clip_length - num_frames))
-    return float((num_frames + m_half / 2.0) / float(N_total))
+    a2_top1 = 1.0 / max(1, n_universe_clips)
+
+    a3_p_exact = 1.0 / (n_universe_clips * clip_len)
+    a3_p_same_clip_only = (
+        (clip_len - 1.0) / (n_universe_clips * clip_len)
+    )
+    # adversary emits one (clip, idx) per guess uniformly at random over
+    # the n_universe_clips * clip_len candidate space; per-guess expected
+    # score is dominated by the half-credit same-clip term
+    a3_per_guess = 1.0 * a3_p_exact + 0.5 * a3_p_same_clip_only
+
+    return {
+        "attack1_per_guess": float(a1_per_guess),
+        "attack2_top1":      float(a2_top1),
+        "attack3_per_guess": float(a3_per_guess),
+    }
 
 
-
-# Log-likelihood under Gaussian noise
-def log_likelihood(
-    o: np.ndarray,
-    o_sim: np.ndarray,
-    sigma: float,
-) -> float:
-    """log P(o | X_sim) ~ -||o - o_sim||^2 / (2*sigma)  (constant dropped)."""
-    diff = o - o_sim
-    return -float(np.sum(diff ** 2)) / (2.0 * sigma**2 )
-
-
-
-# Cached observed release o = T_X(X)
+# Cached observed release o = T_X(X) — frozen per (k, sigma, seed)
 def compute_or_load_o(
-    U: np.ndarray,
-    labels: np.ndarray,
-    c: int,
-    k: int,
-    d: int,
-    sigma: float,
-    seed: int,
+    U:         np.ndarray,
+    labels:    np.ndarray,
+    c:         int,
+    k:         int,
+    d:         int,
+    sigma:     float,
+    seed:      int,
     cache_dir: str,
 ) -> np.ndarray:
-    """Cache o per (k, sigma, seed) to make plot iteration cheap."""
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(
         cache_dir, f"o_k{k}_sigma{sigma:.4f}_seed{seed}.npy"
@@ -308,196 +458,235 @@ def compute_or_load_o(
     return o
 
 
-
-# Main attack
+# Three-attack run
 def run_attack(
-    U: np.ndarray,
-    labels: np.ndarray,
+    U:             np.ndarray,
+    labels:        np.ndarray,
     frame_indices: np.ndarray,
-    clip_ids: np.ndarray,
-    clip_lengths: np.ndarray,
-    c: int,
-    d: int,
-    sigma: float,
-    k: int,
-    n_targets: int = 50,
-    n_trials: int = 10,
-    num_frames: int = 16,
-    seed: int = 0,
-    cache_dir: str = "./cache",
+    clip_ids:      np.ndarray,
+    clip_paths:    List[str],
+    video_root:    str,
+    c:             int,
+    d:             int,
+    sigma:         float,
+    k:             int,
+    n_targets:     int = 50,
+    n_trials:      int = 10,
+    num_frames:    int = 16,
+    size:          int = 112,
+    clip_len:      int = CLIP_LEN,
+    seed:          int = 0,
+    cache_dir:     str = "./cache",
 ) -> dict:
     """
-    Weighted MIA per Xiao et al. 2024, Section 7.2.
+    Three-attack temporal membership inference.
 
-    For each target video, estimate log P(o | H+) vs log P(o | H-) by
-    Monte-Carlo, then guess H+ if mean ll+ > mean ll-. Score the guess
-    under both integer and half-integer weighting rules, and report
-    along with two reference baselines.
+      Attack 1: index inference. Adversary is told the target clip ID.
+                Ranks all clip_len candidate indices for that clip by
+                per-candidate log-likelihood; emits top-T indices.
+                Score: half-integer on (clip, index) pairs (clip fixed
+                so floor at 0.5/guess).
+
+      Attack 2: clip inference. Per-(clip, frame) likelihoods aggregated
+                by clip; top-1 clip emitted. Score: top-1 accuracy.
+
+      Attack 3: frame-level MIA. Top-T (clip, index) pairs over the
+                whole universe by per-row likelihood. Score: half-integer.
+
+    All three attacks share the candidate-likelihood machinery in
+    candidate_scores; they differ only in the candidate set ranked and
+    how guesses are scored.
     """
     rng = np.random.default_rng(seed)
-    n_clips = clip_lengths.shape[0]
+    n_clips = len(clip_paths)
     N_total = U.shape[0]
 
     target_vids = rng.choice(n_clips, size=n_targets, replace=False)
 
+    # Frozen observation o (one per cell). The MC averaging in run_attack
+    # then samples fresh (W, B, perm, M_mix) per trial against this fixed o.
     o = compute_or_load_o(
         U, labels, c, k, d, sigma, seed=seed, cache_dir=cache_dir
     )
 
-    clip_row_indices = [
-        np.where(clip_ids == vid)[0]
-        for vid in range(n_clips)
+    clip_row_indices = [np.where(clip_ids == vid)[0] for vid in range(n_clips)]
+
+    # Pre-load full-clip frames for Attack 1 candidates per target
+    full_clips_cache: Dict[int, np.ndarray] = {}
+
+    # We accumulate raw scores across trials per (target, candidate);
+    # ranks are taken on the trial-averaged scores. This matches the
+    # MC estimator on the (W, B, perm, M_mix) randomness while keeping
+    # o frozen as the observation.
+    a1_scores = []
+    a2_scores = []
+    a3_scores = []
+    a2_correct = 0
+    a3_exact_match_counts = []
+
+    # Pre-compute target metadata (rows, indices, clip-id) for all targets
+    targets_meta = []
+    for vid_idx in target_vids:
+        rows = clip_row_indices[vid_idx]
+        if len(rows) != num_frames:
+            print(f"  [warn] target clip {vid_idx} has {len(rows)} rows != {num_frames}; skipping")
+            continue
+        targets_meta.append({
+            "vid_idx":  int(vid_idx),
+            "rows":     rows,
+            "true_idx": frame_indices[rows].astype(int),
+            "label":    int(labels[rows][0]),
+        })
+
+    # Load full target clips (CLIP_LEN frames) once for Attack 1
+    for tm in targets_meta:
+        vid_idx = tm["vid_idx"]
+        if vid_idx in full_clips_cache:
+            continue
+        rel = clip_paths[vid_idx]
+        full = load_full_clip_gray(
+            os.path.join(video_root, rel), clip_len=clip_len, size=size
+        )
+        if full is None:
+            print(f"  [warn] could not load full clip for target {vid_idx} ({rel})")
+            continue
+        full_clips_cache[vid_idx] = full
+
+    print(f"  Running {n_trials} MC trials over {len(targets_meta)} targets...")
+
+    # Per-target accumulators (trial-averaged score per candidate)
+    sum_universe = [
+        np.zeros(N_total, dtype=np.float64) for _ in targets_meta
+    ]
+    sum_index = [
+        np.zeros(clip_len, dtype=np.float64) for _ in targets_meta
     ]
 
-    weighted_scores_half = []
-    weighted_scores_int = []
-    h_plus_wins = []
-    mean_deltas = []
-    always_h_plus_half = []
-    always_h_plus_int = []
-    random_baseline_half = []
-    random_baseline_int = []
+    for trial_idx in range(n_trials):
+        trial_rng = np.random.default_rng(seed * 10**6 + trial_idx)
+        trial = precompute_trial(U, labels, c, k, d, sigma, trial_rng)
+        UW = trial["UW"]
+        W = trial["W"]
 
-    for t_num, vid_idx in enumerate(target_vids):
-        vid_rows = clip_row_indices[vid_idx]
-        true_fidxs = frame_indices[vid_rows]
-        clip_len = clip_lengths[vid_idx]
-        true_label = labels[vid_rows][0]
+        for ti, tm in enumerate(targets_meta):
+            target_pre = precompute_target(trial, tm["rows"])
 
-        same_class_mask = (labels == true_label) & (
-            ~np.isin(np.arange(len(labels)), vid_rows)
-        )
-        same_class_idxs = np.where(same_class_mask)[0]
+            # Attack 2 / 3: candidates are universe rows
+            scores_uni = candidate_scores(o, UW, target_pre, sigma)
+            sum_universe[ti] += scores_uni
 
-        true_rows_cache = U[vid_rows].copy()
+            # Attack 1: candidates are CLIP_LEN frames of the target clip
+            full = full_clips_cache.get(tm["vid_idx"])
+            if full is not None:
+                full_W = full @ W
+                scores_idx = candidate_scores(o, full_W, target_pre, sigma)
+                sum_index[ti] += scores_idx
 
-        ll_plus_list = []
-        ll_minus_list = []
+        if (trial_idx + 1) % max(1, n_trials // 5) == 0:
+            print(f"    trial {trial_idx + 1}/{n_trials} done")
 
-        for trial in range(n_trials):
-            # H+ trial: true frames remain in U
-            rng_plus = np.random.default_rng(
-                seed * 10**6 + t_num * 10**3 + trial
-            )
-            o_plus = apply_mechanism(U, labels, c, k, d, sigma, rng_plus)
-            ll_plus_list.append(log_likelihood(o, o_plus, sigma))
+    # Score each target on the trial-averaged candidates
+    for ti, tm in enumerate(targets_meta):
+        avg_uni = sum_universe[ti] / float(n_trials)
+        avg_idx = sum_index[ti] / float(n_trials)
 
-            # H- trial: swap target rows, fresh independent keys
-            rng_minus = np.random.default_rng(
-                seed * 10**6 + t_num * 10**3 + trial + 500000
-            )
-            alt_idxs = rng_minus.choice(
-                same_class_idxs, size=num_frames, replace=True
-            )
-            U[vid_rows] = U[alt_idxs]
-            o_minus = apply_mechanism(U, labels, c, k, d, sigma, rng_minus)
-            U[vid_rows] = true_rows_cache
-            ll_minus_list.append(log_likelihood(o, o_minus, sigma))
+        truth = list(zip(
+            np.full(num_frames, tm["vid_idx"], dtype=int).tolist(),
+            tm["true_idx"].tolist(),
+        ))
 
-        mean_ll_plus = float(np.mean(ll_plus_list))
-        mean_ll_minus = float(np.mean(ll_minus_list))
-        h_plus_win = mean_ll_plus > mean_ll_minus
-        mean_delta = mean_ll_plus - mean_ll_minus
-
-        # adversary's guess: true linspace if H+ wins, else uniform random
-        fallback_rng = np.random.default_rng(seed * 10**6 + t_num)
-        if h_plus_win:
-            guessed_fidxs = true_fidxs
+        # Attack 1: top-T indices in [0, clip_len)
+        if tm["vid_idx"] in full_clips_cache:
+            top_idx = np.argsort(-avg_idx)[:num_frames]
+            a1_guesses = [(tm["vid_idx"], int(i)) for i in top_idx]
+            s1 = compute_weighted_score(a1_guesses, truth, weight_rule="half")
         else:
-            guessed_fidxs = np.sort(
-                fallback_rng.choice(
-                    clip_len, size=num_frames, replace=False
-                )
-            ).astype(int)
+            s1 = float("nan")
+        a1_scores.append(s1)
 
-        # score adversary under both weighting rules
-        w_half = compute_weighted_score(
-            guessed_fidxs, true_fidxs, clip_len, weight_rule="half"
-        )
-        w_int = compute_weighted_score(
-            guessed_fidxs, true_fidxs, clip_len, weight_rule="integer"
-        )
-        weighted_scores_half.append(w_half)
-        weighted_scores_int.append(w_int)
+        # Attack 2: aggregate per-clip, emit top-1
+        per_clip = np.zeros(n_clips, dtype=np.float64)
+        np.add.at(per_clip, clip_ids, avg_uni)
+        top1_clip = int(np.argmax(per_clip))
+        s2 = 1.0 if top1_clip == tm["vid_idx"] else 0.0
+        a2_scores.append(s2)
+        if s2 > 0:
+            a2_correct += 1
 
-        # always-H+ baseline = score returned by always guessing true frames
-        b_half = compute_weighted_score(
-            true_fidxs, true_fidxs, clip_len, weight_rule="half"
-        )
-        b_int = compute_weighted_score(
-            true_fidxs, true_fidxs, clip_len, weight_rule="integer"
-        )
-        always_h_plus_half.append(b_half)
-        always_h_plus_int.append(b_int)
+        # Attack 3: top-T (clip, index) pairs from the whole universe
+        top_uni = np.argsort(-avg_uni)[:num_frames]
+        a3_guesses = [
+            (int(clip_ids[r]), int(frame_indices[r])) for r in top_uni
+        ]
+        s3 = compute_weighted_score(a3_guesses, truth, weight_rule="half")
+        a3_scores.append(s3)
 
-        # analytical Lemma-3 random baseline (per-clip)
-        random_baseline_half.append(
-            lemma3_random_baseline(
-                num_frames, clip_len, N_total, weight_rule="half"
-            ) * num_frames
-        )
-        random_baseline_int.append(
-            lemma3_random_baseline(
-                num_frames, clip_len, N_total, weight_rule="integer"
-            ) * num_frames
-        )
+        # also report integer-rule (exact-only) score on Attack 3, for §6.5
+        s3_int = compute_weighted_score(a3_guesses, truth, weight_rule="integer")
+        a3_exact_match_counts.append(s3_int)
 
-        h_plus_wins.append(h_plus_win)
-        mean_deltas.append(mean_delta)
+    a1_scores = np.array(a1_scores, dtype=float)
+    a2_scores = np.array(a2_scores, dtype=float)
+    a3_scores = np.array(a3_scores, dtype=float)
+    a3_int    = np.array(a3_exact_match_counts, dtype=float)
 
-        if (t_num + 1) % 10 == 0 or t_num == n_targets - 1:
-            print(
-                f"  [{t_num+1:3d}/{n_targets}] H+={h_plus_win}  "
-                f"score(half)={w_half:.1f}/{num_frames}  "
-                f"score(int)={w_int:.1f}/{num_frames}"
-            )
+    base = lemma3_random_baseline_attacks(
+        n_universe_clips=n_clips, num_frames=num_frames, clip_len=clip_len,
+    )
 
-    weighted_scores_half = np.array(weighted_scores_half, dtype=float)
-    weighted_scores_int = np.array(weighted_scores_int, dtype=float)
-    h_plus_wins = np.array(h_plus_wins, dtype=bool)
-    mean_deltas = np.array(mean_deltas, dtype=float)
-    always_h_plus_half = np.array(always_h_plus_half, dtype=float)
-    always_h_plus_int = np.array(always_h_plus_int, dtype=float)
-    random_baseline_half = np.array(random_baseline_half, dtype=float)
-    random_baseline_int = np.array(random_baseline_int, dtype=float)
+    # Normalize: per-guess for Attack 1 and Attack 3 (divide by num_frames),
+    # already binary for Attack 2.
+    n_a1_valid = int((~np.isnan(a1_scores)).sum())
+    a1_norm = float(np.nanmean(a1_scores) / num_frames) if n_a1_valid > 0 else float("nan")
+    a1_std  = float(np.nanstd(a1_scores)  / num_frames) if n_a1_valid > 0 else float("nan")
+    a2_norm = float(a2_scores.mean())
+    a2_std  = float(a2_scores.std())
+    a3_norm = float(a3_scores.mean() / num_frames)
+    a3_std  = float(a3_scores.std()  / num_frames)
+    a3_int_norm = float(a3_int.mean() / num_frames)
+    a3_int_std  = float(a3_int.std()  / num_frames)
 
     print(f"\n--- Attack Results (k={k}, sigma={sigma}) ---")
-    print(f"H+ win rate            : {h_plus_wins.mean():.3f}")
-    print(f"Adversary score (half) : {weighted_scores_half.mean()/num_frames:.4f}")
-    print(f"Adversary score (int)  : {weighted_scores_int.mean()/num_frames:.4f}")
-    print(f"Always-H+ (half)       : {always_h_plus_half.mean()/num_frames:.4f}")
-    print(f"Always-H+ (int)        : {always_h_plus_int.mean()/num_frames:.4f}")
-    print(f"Random baseline (half) : {random_baseline_half.mean()/num_frames:.4f}")
-    print(f"Random baseline (int)  : {random_baseline_int.mean()/num_frames:.4f}")
-    print(f"Mean delta             : {mean_deltas.mean():.4e}")
+    print(f"Attack 1 (index inference, half) : {a1_norm:.4f}   "
+          f"(baseline {base['attack1_per_guess']:.4f})")
+    print(f"Attack 2 (clip inference, top-1) : {a2_norm:.4f}   "
+          f"(baseline {base['attack2_top1']:.6f})")
+    print(f"Attack 3 (frame-level MIA, half) : {a3_norm:.4f}   "
+          f"(baseline {base['attack3_per_guess']:.6f})")
+    print(f"Attack 3 (frame-level MIA, int)  : {a3_int_norm:.4f}")
 
     return {
-        "k": k,
-        "sigma": sigma,
-        "n_targets": n_targets,
-        "n_trials": n_trials,
-        "h_plus_win_rate": float(h_plus_wins.mean()),
-        "h_plus_win_se": float(
-            np.sqrt(h_plus_wins.mean() * (1 - h_plus_wins.mean()) / n_targets)
-        ),
-        "score_half": float(weighted_scores_half.mean() / num_frames),
-        "score_int": float(weighted_scores_int.mean() / num_frames),
-        "score_half_std": float(weighted_scores_half.std() / num_frames),
-        "score_int_std": float(weighted_scores_int.std() / num_frames),
-        "always_h_plus_half": float(always_h_plus_half.mean() / num_frames),
-        "always_h_plus_int": float(always_h_plus_int.mean() / num_frames),
-        "random_baseline_half": float(random_baseline_half.mean() / num_frames),
-        "random_baseline_int": float(random_baseline_int.mean() / num_frames),
-        "mean_delta": float(mean_deltas.mean()),
-        "std_delta": float(mean_deltas.std()),
+        "k": k, "sigma": sigma,
+        "n_targets":         n_targets,
+        "n_trials":          n_trials,
+        "n_universe_clips":  int(n_clips),
+        "n_universe_frames": int(N_total),
+        "clip_len":          int(clip_len),
+        "num_frames":        int(num_frames),
+        # Attack 1
+        "attack1_score_half":      a1_norm,
+        "attack1_score_half_std":  a1_std,
+        "attack1_baseline_half":   base["attack1_per_guess"],
+        # Attack 2
+        "attack2_top1":            a2_norm,
+        "attack2_top1_std":        a2_std,
+        "attack2_baseline":        base["attack2_top1"],
+        # Attack 3
+        "attack3_score_half":      a3_norm,
+        "attack3_score_half_std":  a3_std,
+        "attack3_score_int":       a3_int_norm,
+        "attack3_score_int_std":   a3_int_std,
+        "attack3_baseline_half":   base["attack3_per_guess"],
     }
-
 
 
 # Entry point
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run weighted MIA for one k value across all sigmas."
+        description=(
+            "Three-attack temporal MIA: index inference, clip inference, "
+            "and frame-level membership inference."
+        )
     )
     parser.add_argument(
         "--k", type=int, required=True, choices=[0, 1, 5],
@@ -509,7 +698,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--n-trials", type=int, default=10,
-        help="Number of MC trials per H+/H- estimate (default: 10)",
+        help="Number of MC trials per cell (default: 10)",
     )
     parser.add_argument(
         "--results-dir", type=str, default="./results",
@@ -519,6 +708,11 @@ if __name__ == "__main__":
         "--cache-dir", type=str, default="./cache",
         help="Cache directory for observed release o (default: ./cache)",
     )
+    parser.add_argument(
+        "--sigmas", type=float, nargs="+",
+        default=[0.01, 0.05, 0.10, 0.50],
+        help="Noise standard deviations to sweep",
+    )
     args = parser.parse_args()
 
     SEED = 42
@@ -526,33 +720,48 @@ if __name__ == "__main__":
     SIZE = 112
     D = 500
     SPLIT = 1
-    SIGMAS = [0.01, 0.05, 0.10, 0.50]
 
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    VIDEO_ROOT = os.path.join(SCRIPT_DIR, "data", "UCF-101")
-    ANNOT_ROOT = os.path.join(SCRIPT_DIR, "data", "ucfTrainTestlist")
-    CACHE_PATH = os.path.join(SCRIPT_DIR, "ucf101_frame_pool_gray_random.npz")
+    PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+    VIDEO_ROOT = os.path.join(PROJECT_ROOT, "data", "UCF-101")
+    ANNOT_ROOT = os.path.join(PROJECT_ROOT, "data", "ucfTrainTestlist")
+    CACHE_PATH = os.path.join(
+        PROJECT_ROOT, f"ucf101_frame_pool_gray_random_len{CLIP_LEN}.npz"
+    )
 
-    data_root = os.path.join(SCRIPT_DIR, "data")
-    download_ucf101(data_root, VIDEO_ROOT, ANNOT_ROOT)   # no-op if already present
+    data_root = os.path.join(PROJECT_ROOT, "data")
+    download_ucf101(data_root, VIDEO_ROOT, ANNOT_ROOT)
     set_seed(SEED)
 
     _, train_list, _ = parse_ucf101_split(ANNOT_ROOT, SPLIT)
-    print(f"Training videos: {len(train_list)}")
+    print(f"Training videos (raw): {len(train_list)}")
+
+    train_cache = _long_clips_cache_path(ANNOT_ROOT, SPLIT, CLIP_LEN) \
+        .replace(".json", "_train.json")
+    train_list, dropped = filter_long_clips(
+        VIDEO_ROOT, train_list, CLIP_LEN, cache_path=train_cache, desc="train"
+    )
+    print(
+        f"After CLIP_LEN={CLIP_LEN} filter: kept {len(train_list)}, "
+        f"dropped {dropped}"
+    )
     c = 101
 
     print("\nBuilding frame pool...")
-    U, labels, frame_indices, clip_ids, clip_lengths = build_frame_pool(
+    U, labels, frame_indices, clip_ids, clip_paths = build_frame_pool(
         video_root=VIDEO_ROOT,
         train_list=train_list,
         cache_path=CACHE_PATH,
         num_frames=NUM_FRAMES,
         size=SIZE,
         seed=SEED,
+        clip_len=CLIP_LEN,
     )
-    print(f"U shape: {U.shape}")
+    print(f"U shape: {U.shape}, n_clips_in_universe: {len(clip_paths)}")
 
-    for i, sigma in enumerate(SIGMAS):
+    os.makedirs(args.results_dir, exist_ok=True)
+
+    for i, sigma in enumerate(args.sigmas):
         out_path = os.path.join(
             args.results_dir, f"attack_k{args.k}_sigma{sigma:.4f}.csv"
         )
@@ -560,25 +769,18 @@ if __name__ == "__main__":
             print(f"\n[skip] {out_path} already exists")
             continue
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Running attack: k={args.k}, sigma={sigma}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         result = run_attack(
-            U=U,
-            labels=labels,
-            frame_indices=frame_indices,
-            clip_ids=clip_ids,
-            clip_lengths=clip_lengths,
-            c=c,
-            d=D,
-            sigma=sigma,
-            k=args.k,
-            n_targets=args.n_targets,
-            n_trials=args.n_trials,
-            num_frames=NUM_FRAMES,
-            seed=SEED + i,
-            cache_dir=args.cache_dir,
+            U=U, labels=labels, frame_indices=frame_indices,
+            clip_ids=clip_ids, clip_paths=clip_paths,
+            video_root=VIDEO_ROOT,
+            c=c, d=D, sigma=sigma, k=args.k,
+            n_targets=args.n_targets, n_trials=args.n_trials,
+            num_frames=NUM_FRAMES, size=SIZE, clip_len=CLIP_LEN,
+            seed=SEED + i, cache_dir=args.cache_dir,
         )
 
         df = pd.DataFrame([result])

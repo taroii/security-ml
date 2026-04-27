@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import random
 import shutil
@@ -18,6 +19,12 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models import resnet18, ResNet18_Weights
+
+
+# Common trimming length: clips with fewer than CLIP_LEN frames are dropped
+# from the dataset; longer clips are truncated to their first CLIP_LEN frames.
+# Both downstream and MIA pipelines must agree on this constant.
+CLIP_LEN = 200
 
 
 
@@ -164,32 +171,121 @@ def download_ucf101(data_root: str, video_root: str, annot_root: str):
 
 
 # Video loading
-def load_video_frames(path: str, num_frames: int = 16, size: int = 224) -> torch.Tensor:
+def load_video_frames(
+    path: str,
+    num_frames: int = 16,
+    size: int = 224,
+    rng: np.random.Generator = None,
+    clip_len: int = CLIP_LEN,
+) -> torch.Tensor:
+    """
+    Load a clip and sample num_frames random indices from [0, clip_len).
+    Caller must guarantee the clip has at least clip_len frames (use
+    filter_long_clips upstream). Frames after clip_len are ignored.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {path}")
 
-    frames = []
-    while True:
+    indices = np.sort(
+        rng.choice(clip_len, size=num_frames, replace=False)
+    ).astype(int)
+
+    frames = [None] * num_frames
+    next_target = 0  # position in indices we need next
+    cur = 0  # current frame number being read
+    while next_target < num_frames:
         ret, frame = cap.read()
         if not ret:
             break
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame = cv2.resize(frame, (size, size))
-        frames.append(frame)
+        if cur == int(indices[next_target]):
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame = cv2.resize(frame, (size, size))
+            frames[next_target] = frame
+            next_target += 1
+        cur += 1
+        if cur >= clip_len:
+            break
     cap.release()
 
-    if len(frames) == 0:
-        raise RuntimeError(f"No frames read from video: {path}")
-
-    total = len(frames)
-    indices = np.linspace(0, total - 1, num_frames, dtype=int)
-    frames = [frames[i] for i in indices]
+    if next_target < num_frames:
+        raise RuntimeError(
+            f"Only read {next_target}/{num_frames} requested frames "
+            f"from {path} (clip shorter than CLIP_LEN={clip_len}?)"
+        )
 
     clip = np.stack(frames, axis=0)
     clip = torch.from_numpy(clip).float() / 255.0
     clip = clip.permute(3, 0, 1, 2)
     return clip
+
+
+# Cache file for the filtered (clips ≥ CLIP_LEN) sample list. Both
+# main_video.py and membership_inference.py read this cache.
+def _long_clips_cache_path(annot_root: str, split: int, clip_len: int) -> str:
+    return os.path.join(
+        annot_root, f"long_clips_split{split:02d}_len{clip_len}.json"
+    )
+
+
+def filter_long_clips(
+    video_root: str,
+    samples: List[Tuple[str, int]],
+    clip_len: int,
+    cache_path: str = None,
+    desc: str = "samples",
+) -> Tuple[List[Tuple[str, int]], int]:
+    """
+    Drop clips with total frame count < clip_len. Returns (kept, dropped).
+    Reads CAP_PROP_FRAME_COUNT (metadata only, fast). Caches kept paths
+    in cache_path keyed by clip_len for reuse.
+    """
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path, "r") as f:
+            data = json.load(f)
+        if int(data.get("clip_len", -1)) == clip_len:
+            kept_set = set(data["kept_paths"])
+            kept = [(rel, lbl) for rel, lbl in samples if rel in kept_set]
+            dropped = len(samples) - len(kept)
+            print(
+                f"[filter] {desc}: loaded cached length filter "
+                f"({len(kept)} kept, {dropped} dropped, clip_len={clip_len})"
+            )
+            return kept, dropped
+
+    print(
+        f"[filter] {desc}: scanning {len(samples)} clips for length>={clip_len}..."
+    )
+    kept = []
+    dropped = 0
+    for n, (rel_path, label) in enumerate(samples):
+        video_path = os.path.join(video_root, rel_path)
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            dropped += 1
+            continue
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        if total >= clip_len:
+            kept.append((rel_path, label))
+        else:
+            dropped += 1
+        if (n + 1) % 1000 == 0:
+            print(f"  scanned {n + 1}/{len(samples)}")
+    print(
+        f"[filter] {desc}: kept {len(kept)} / dropped {dropped} (total {len(samples)})"
+    )
+
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        with open(cache_path, "w") as f:
+            json.dump(
+                {"clip_len": clip_len, "kept_paths": [k[0] for k in kept]}, f
+            )
+    return kept, dropped
 
 
 
@@ -232,11 +328,14 @@ def parse_ucf101_split(
 
 # UCF-101 Dataset
 class UCF101Dataset(Dataset):
-    def __init__(self, video_root, samples, num_frames=16, size=224):
+    def __init__(self, video_root, samples, num_frames=16, size=224,
+                 clip_len=CLIP_LEN, sampling_seed=0):
         self.video_root = video_root
         self.samples = samples
         self.num_frames = num_frames
         self.size = size
+        self.clip_len = clip_len
+        self.sampling_seed = sampling_seed
 
     def __len__(self):
         return len(self.samples)
@@ -244,7 +343,13 @@ class UCF101Dataset(Dataset):
     def __getitem__(self, idx):
         rel_path, label = self.samples[idx]
         video_path = os.path.join(self.video_root, rel_path)
-        clip = load_video_frames(video_path, self.num_frames, self.size)
+        # deterministic per-clip rng so the embedding cache and any future
+        # rebuild use the same indices for the same (sample idx, sampling_seed)
+        rng = np.random.default_rng(self.sampling_seed * (1 << 20) + idx)
+        clip = load_video_frames(
+            video_path, self.num_frames, self.size, rng=rng,
+            clip_len=self.clip_len,
+        )
         return clip, label
 
 
@@ -258,6 +363,8 @@ def embed_dataset(
     batch_size: int,
     cache_path: str,
     num_frames: int = 16,
+    clip_len: int = CLIP_LEN,
+    sampling_seed: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if os.path.exists(cache_path):
         obj = torch.load(cache_path, map_location="cpu")
@@ -272,7 +379,10 @@ def embed_dataset(
     img_mean = torch.tensor(weights.transforms().mean).view(1, 3, 1, 1).to(device)
     img_std = torch.tensor(weights.transforms().std).view(1, 3, 1, 1).to(device)
 
-    dataset = UCF101Dataset(video_root, samples, num_frames=num_frames, size=224)
+    dataset = UCF101Dataset(
+        video_root, samples, num_frames=num_frames, size=224,
+        clip_len=clip_len, sampling_seed=sampling_seed,
+    )
 
     def collate_fn(batch):
         clips, labels = zip(*batch)
@@ -554,12 +664,34 @@ if __name__ == "__main__":
     print(f"Cell: k={args.k}, sigma={args.sigma}")
 
     _, train_list, test_list = parse_ucf101_split(ANNOT_ROOT, SPLIT)
-    print(f"UCF-101 split {SPLIT}: {len(train_list)} train, {len(test_list)} test")
+    print(f"UCF-101 split {SPLIT}: {len(train_list)} train, {len(test_list)} test (raw)")
+
+    train_cache = _long_clips_cache_path(ANNOT_ROOT, SPLIT, CLIP_LEN) \
+        .replace(".json", "_train.json")
+    test_cache = _long_clips_cache_path(ANNOT_ROOT, SPLIT, CLIP_LEN) \
+        .replace(".json", "_test.json")
+    train_list, train_dropped = filter_long_clips(
+        VIDEO_ROOT, train_list, CLIP_LEN, cache_path=train_cache, desc="train"
+    )
+    test_list, test_dropped = filter_long_clips(
+        VIDEO_ROOT, test_list, CLIP_LEN, cache_path=test_cache, desc="test"
+    )
+    print(
+        f"After CLIP_LEN={CLIP_LEN} filter: train kept {len(train_list)} "
+        f"(dropped {train_dropped}), test kept {len(test_list)} "
+        f"(dropped {test_dropped})"
+    )
 
     print("\nEmbedding training clips...")
-    Xtr, ytr = embed_dataset(VIDEO_ROOT, train_list, device, EMBED_BS, CACHE_TRAIN)
+    Xtr, ytr = embed_dataset(
+        VIDEO_ROOT, train_list, device, EMBED_BS, CACHE_TRAIN,
+        clip_len=CLIP_LEN, sampling_seed=args.seed,
+    )
     print("\nEmbedding test clips...")
-    Xte, yte = embed_dataset(VIDEO_ROOT, test_list, device, EMBED_BS, CACHE_TEST)
+    Xte, yte = embed_dataset(
+        VIDEO_ROOT, test_list, device, EMBED_BS, CACHE_TEST,
+        clip_len=CLIP_LEN, sampling_seed=args.seed,
+    )
 
     d0 = Xtr.shape[2]
     T = Xtr.shape[1]
