@@ -35,6 +35,16 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# Conda env wrapper. If $CONDA_DEFAULT_ENV already names the right env we
+# call python directly; otherwise we route through `conda run -n <env>`.
+# Override CONDA_ENV=foo to use a different env name.
+: "${CONDA_ENV:=security}"
+if [[ "${CONDA_DEFAULT_ENV:-}" == "$CONDA_ENV" ]]; then
+    PY=(python)
+else
+    PY=(conda run --no-capture-output -n "$CONDA_ENV" python)
+fi
+
 # Compute knobs (small defaults for fast iteration)
 : "${N_TARGETS:=10}"
 : "${N_TRIALS:=5}"
@@ -65,7 +75,7 @@ echo "========================================================="
 run_smoke() {
     echo
     echo "--- Smoke test: k=0, sigma=0.10, n_targets=2, n_trials=2 ---"
-    python src/membership_inference.py \
+    "${PY[@]}" src/membership_inference.py \
         --k 0 --sigmas 0.10 \
         --n-targets 2 --n-trials 2 \
         --n-clip-candidates 10 \
@@ -83,7 +93,7 @@ run_mia() {
     for k in $K_VALUES; do
         log="$LOG_DIR/mia_k${k}.log"
         echo "Running k=$k -> $log"
-        python src/membership_inference.py \
+        "${PY[@]}" src/membership_inference.py \
             --k "$k" \
             --sigmas $SIGMAS \
             --n-targets "$N_TARGETS" \
@@ -94,7 +104,7 @@ run_mia() {
             > "$log" 2>&1
         echo "  k=$k done."
     done
-    python src/merge_results.py \
+    "${PY[@]}" src/merge_results.py \
         --results-dir "$RESULTS_DIR" \
         --output ./merged_results.csv
 }
@@ -112,7 +122,7 @@ run_accuracy() {
     for k in $K_VALUES; do for s in $SIGMAS; do FIRST_K="$k"; FIRST_S="$s"; break 2; done; done
     log="$LOG_DIR/acc_k${FIRST_K}_sigma${FIRST_S}.log"
     echo "First cell (builds embedding cache): k=$FIRST_K sigma=$FIRST_S -> $log"
-    python src/main_video.py --k "$FIRST_K" --sigma "$FIRST_S" \
+    "${PY[@]}" src/main_video.py --k "$FIRST_K" --sigma "$FIRST_S" \
         --results-dir "$ACC_DIR" > "$log" 2>&1
 
     PIDS=()
@@ -122,14 +132,14 @@ run_accuracy() {
             while (( $(jobs -rp | wc -l) >= ACC_PARALLEL )); do sleep 5; done
             log="$LOG_DIR/acc_k${k}_sigma${s}.log"
             echo "Launching k=$k sigma=$s -> $log"
-            python src/main_video.py --k "$k" --sigma "$s" \
+            "${PY[@]}" src/main_video.py --k "$k" --sigma "$s" \
                 --results-dir "$ACC_DIR" > "$log" 2>&1 &
             PIDS+=($!)
         done
     done
     for pid in "${PIDS[@]}"; do wait "$pid"; done
     echo "All accuracy cells done."
-    python src/merge_accuracy.py \
+    "${PY[@]}" src/merge_accuracy.py \
         --results-dir "$ACC_DIR" \
         --output ./merged_accuracy.csv
 }
@@ -137,14 +147,14 @@ run_accuracy() {
 run_plots() {
     echo
     echo "--- Plots ---"
-    python src/figure2_mia_robustness.py \
+    "${PY[@]}" src/figure2_mia_robustness.py \
         --input ./merged_results.csv \
         --output "$IMG_DIR/fig2_mia_robustness.pdf"
-    python src/figure3_integer_vs_half.py \
+    "${PY[@]}" src/figure3_integer_vs_half.py \
         --input ./merged_results.csv \
         --output "$IMG_DIR/fig3_int_vs_half.pdf" || \
         echo "  [warn] figure3 failed (likely arg-shape mismatch); inspect later"
-    python src/figure4_pareto.py \
+    "${PY[@]}" src/figure4_pareto.py \
         --mia ./merged_results.csv \
         --accuracy ./merged_accuracy.csv \
         --output "$IMG_DIR/fig4_pareto.pdf" || \
