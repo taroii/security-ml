@@ -223,3 +223,9 @@ ucf101_r3d18_embed.pt
 *.md
 logs/
 attack_results_10_trials/cache/
+cache/
+*.npy
+*.npz
+*.pt
+data/UCF-101/
+data/ucfTrainTestlist/
