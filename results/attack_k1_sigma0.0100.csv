@@ -1,2 +1,0 @@
-k,sigma,n_targets,n_trials,n_universe_clips,n_universe_frames,clip_len,num_frames,attack1_score_half,attack1_score_half_std,attack1_baseline_half,attack2_top1,attack2_top1_std,attack2_baseline,attack3_score_half,attack3_score_half_std,attack3_score_int,attack3_score_int_std,attack3_baseline_half
-1,0.010000,50,10,7954,127264,100,16,0.579375,0.042486,0.580000,0.000000,0.000000,0.000126,0.000000,0.000000,0.000000,0.000000,0.000063
