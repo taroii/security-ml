@@ -93,14 +93,35 @@ def make_figure(df: pd.DataFrame, save_path: str):
     """
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
+    # Prefer the window-rule columns (Attack 1 with +-window proximity
+    # half-credit, see compute_weighted_score docstring). Fall back to
+    # the older "same-clip = 0.5" half-rule column for legacy CSVs.
+    if "attack1_score_window" in df.columns:
+        a1_score_col = "attack1_score_window"
+        a1_std_col = "attack1_score_window_std"
+        a1_base_col = "attack1_baseline_window"
+        a1_window = (
+            int(df["attack1_window"].iloc[0]) if "attack1_window" in df.columns else 2
+        )
+        a1_title = f"(a) Index Inference (clip given, $\\pm${a1_window} window)"
+        a1_ylabel = r"Window-rule score (clip fixed)"
+        a1_ylim = (0.30, 1.05)
+    else:
+        a1_score_col = "attack1_score_half"
+        a1_std_col = "attack1_score_half_std"
+        a1_base_col = "attack1_baseline_half"
+        a1_title = "(a) Index Inference (clip given)"
+        a1_ylabel = r"Half-integer score (clip fixed)"
+        a1_ylim = (0.45, 1.05)
+
     _plot_attack_panel(
         axes[0], df,
-        score_col="attack1_score_half",
-        std_col="attack1_score_half_std",
-        baseline_col="attack1_baseline_half",
-        title="(a) Index Inference (clip given)",
-        ylabel=r"Half-integer score (clip fixed)",
-        ylim=(0.45, 1.05),
+        score_col=a1_score_col,
+        std_col=a1_std_col,
+        baseline_col=a1_base_col,
+        title=a1_title,
+        ylabel=a1_ylabel,
+        ylim=a1_ylim,
     )
     _plot_attack_panel(
         axes[1], df,

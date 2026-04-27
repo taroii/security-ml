@@ -356,21 +356,30 @@ def precompute_target_lira(
 
 
 def lira_score_clip_candidates(
-    trial:    Dict,
-    target_pre: Dict,
+    trial:               Dict,
+    target_pre:          Dict,
     candidate_clip_rows: np.ndarray,
-    sigma:    float,
+    candidate_cfs:       np.ndarray,
+    sigma:               float,
 ) -> np.ndarray:
     """
-    Score candidate clips for Attack 2.
+    Score candidate clips for Attack 2 (per-candidate LiRA).
 
-    candidate_clip_rows: (n_candidates, T) array of universe row indices,
-        one row of T positions per candidate clip. The candidate's
-        hypothesis is "this clip's T rows occupy the target's slots"
-        (so its delta vs the counterfactual baseline is the candidate's
-        rows minus the counterfactual rows, slot-by-slot).
+    For each candidate c with rows c_rows and counterfactual cf_c, the
+    hypothesis is "c is the target." pred_diff_c is built at c's OWN
+    M_mix-touch positions (records_c_hits) — i.e. the mixed rows that
+    c_rows actually appear in — using (UW[c_rows[t]] - UW[cf_c[t]]) at
+    each slot t.
 
-    Returns: (n_candidates,) LR scores, divided by sigma^2.
+    For c = the true target with cf_c == target_pre's counterfactual,
+    pred_diff_c equals truth_diff_W exactly, so LR_target maximizes.
+    For c != target, pred_diff_c is supported on c's M_mix-touch
+    positions (different from target's), so residual . pred_diff_c
+    has only incidental overlap with residual's signal -> small LR.
+
+    candidate_clip_rows: (n_candidates, T) universe row indices.
+    candidate_cfs:       (n_candidates, T) counterfactual rows
+        (same-class, not in candidate's clip), one per candidate.
     """
     UW = trial["UW"]
     perm = trial["perm"]
@@ -382,50 +391,42 @@ def lira_score_clip_candidates(
     d = UW.shape[1]
 
     residual = target_pre["residual"]
-    target_rows = target_pre["target_rows"]
-    counterfactual_rows = target_pre["counterfactual_rows"]
-    records_target_hits = target_pre["records_target_hits"]
 
-    n_cand = candidate_clip_rows.shape[0]
-    T = len(target_rows)
-    assert candidate_clip_rows.shape[1] == T
+    n_cand, T = candidate_clip_rows.shape
+    assert candidate_cfs.shape == candidate_clip_rows.shape, \
+        "candidate_cfs must have the same shape as candidate_clip_rows"
 
     scores = np.zeros(n_cand, dtype=np.float32)
 
-    # k=0: pred is sparse with only T nonzero rows (target_rows). The
-    # post-perm row positions of the target slots are inv_perm[target_rows].
-    # Use that to compute the residual-pred dot and the squared-norm in
-    # O(T*d) instead of O(N_total*d).
+    # k=0: for each candidate c, pred is nonzero only at c_rows (m=N_total).
+    # Use inv_perm[c_rows] to index into residual sparsely.
     if k == 0:
-        target_perm_idx = inv_perm[target_rows]                  # (T,)
-        residual_at_target = residual[target_perm_idx]           # (T, d)
         for ci in range(n_cand):
             c_rows = candidate_clip_rows[ci]
+            cf_c = candidate_cfs[ci]
+            c_perm_idx = inv_perm[c_rows]                          # (T,)
+            residual_at_c = residual[c_perm_idx]                   # (T, d)
             slot_diff_W = (
                 UW[c_rows].astype(np.float32)
-                - UW[counterfactual_rows].astype(np.float32)
-            )                                                     # (T, d)
-            dot = float((residual_at_target * slot_diff_W).sum())
+                - UW[cf_c].astype(np.float32)
+            )                                                       # (T, d)
+            dot = float((residual_at_c * slot_diff_W).sum())
             nrm = float((slot_diff_W * slot_diff_W).sum())
             scores[ci] = (dot - 0.5 * nrm) / (sigma ** 2)
         return scores
 
-    # k>=1: pred has nonzero entries only at mixed rows that touch a target
-    # slot (records_target_hits). Per-candidate cost is the total slot-hit
-    # count across all mixed rows (~ T*c for typical M_mix).
+    # k>=1: per-candidate, find which mixed rows touch any of c_rows
+    # (records_c_hits) and accumulate the c-vs-cf contribution there.
     for ci in range(n_cand):
         c_rows = candidate_clip_rows[ci]
-        slot_diff_W = (
-            UW[c_rows].astype(np.float32) - UW[counterfactual_rows].astype(np.float32)
-        )  # (T, d)
+        cf_c = candidate_cfs[ci]
+        cf_map = dict(zip(c_rows.tolist(), cf_c.tolist()))
+
         pred = np.zeros((m, d), dtype=np.float32)
-        for i, hits in enumerate(records_target_hits):
-            if not hits:
-                continue
-            acc = np.zeros(d, dtype=np.float32)
-            for slot_in_target, _ in hits:
-                acc += slot_diff_W[slot_in_target] * coef
-            pred[i] = acc
+        for i, sel in enumerate(records):
+            for s in sel.tolist():
+                if s in cf_map:
+                    pred[i] += (UW[s] - UW[cf_map[s]]) * coef
         pred_perm = pred[perm]
 
         dot = float((residual * pred_perm).sum())
@@ -596,29 +597,93 @@ def _lira_score_external_uw(
     return (dot_terms - 0.5 * nrm_terms) / (sigma ** 2)
 
 
-# Weighted scoring on (clip, index) pairs (no proximity window)
+# Weighted scoring on (clip, index) pairs.
+#
+# Three weight rules:
+#   - "integer": exact (clip, index) match -> 1; everything else -> 0.
+#   - "half":    exact -> 1; same clip, any index -> 0.5; else -> 0.
+#                (the wednesday-plan default; baseline floor is 0.5/guess
+#                for clip-given attacks like Attack 1.)
+#   - "window":  exact -> 1; same clip and within +-window indices of
+#                ANY true frame -> 0.5; else -> 0.  (Brings back the
+#                temporal-proximity reading from main.tex section 6.2,
+#                where the original paper used a 1% window; default
+#                window=2 here corresponds to 2% on clip_len=100.)
 def compute_weighted_score(
     guesses:     List[Tuple[int, int]],
     truth:       List[Tuple[int, int]],
     weight_rule: str = "half",
+    window:      int = 0,
 ) -> float:
     """
-    Score a guess set against the ground-truth set under the
-    half-integer rule on (clip, index) pairs:
-        exact (clip, index) match -> 1
-        same clip, any index      -> 0.5  (only when rule == "half")
-        different clip            -> 0
+    Score a guess set against the ground-truth (clip, index) pairs.
+    `window` is only used when weight_rule == "window".
     """
     truth_set = set((int(c), int(i)) for c, i in truth)
-    truth_clips = set(c for c, _ in truth_set)
+    if weight_rule == "window":
+        # Map clip -> sorted list of true indices, for window membership.
+        clip_to_true_idxs: Dict[int, List[int]] = {}
+        for c, i in truth_set:
+            clip_to_true_idxs.setdefault(c, []).append(i)
+    else:
+        truth_clips = set(c for c, _ in truth_set)
+
     total = 0.0
     for c_hat, i_hat in guesses:
-        key = (int(c_hat), int(i_hat))
+        c_hat_i = int(c_hat)
+        i_hat_i = int(i_hat)
+        key = (c_hat_i, i_hat_i)
         if key in truth_set:
             total += 1.0
-        elif weight_rule == "half" and int(c_hat) in truth_clips:
-            total += 0.5
+            continue
+        if weight_rule == "half":
+            if c_hat_i in truth_clips:
+                total += 0.5
+        elif weight_rule == "window":
+            true_idxs = clip_to_true_idxs.get(c_hat_i)
+            if true_idxs is None:
+                continue
+            # In window of any true frame in the same clip?
+            for ti in true_idxs:
+                if abs(i_hat_i - ti) <= window:
+                    total += 0.5
+                    break
+        # weight_rule == "integer" -> add nothing
     return total
+
+
+def attack1_window_baseline(
+    num_frames: int,
+    clip_len:   int,
+    window:     int,
+    n_mc:       int = 4000,
+    seed:       int = 0,
+) -> float:
+    """
+    Closed-form Attack-1 random baseline under the window rule is awkward
+    because windows around adjacent true frames can overlap. Estimate the
+    per-guess expected score by Monte Carlo over the random sampling of
+    the T true indices. n_mc trials of (uniform T-subset of [0, clip_len);
+    union of +-window zones around each true index) gives the expected
+    fraction of clip positions awarding 0.5 credit. Combined with the
+    exact-match prob T/clip_len gives the per-guess baseline.
+    """
+    rng = np.random.default_rng(seed)
+    p_exact = num_frames / clip_len
+    half_credit_frac_acc = 0.0
+    for _ in range(n_mc):
+        true_idxs = rng.choice(clip_len, size=num_frames, replace=False)
+        # union of +-window around each true index (excluding the exact
+        # positions themselves, which already get +1 credit).
+        in_window = np.zeros(clip_len, dtype=bool)
+        for ti in true_idxs:
+            lo = max(0, int(ti) - window)
+            hi = min(clip_len - 1, int(ti) + window)
+            in_window[lo:hi + 1] = True
+        in_window[true_idxs] = False  # don't double-count exacts
+        half_credit_frac_acc += float(in_window.sum()) / clip_len
+    p_half = half_credit_frac_acc / n_mc
+    return float(1.0 * p_exact + 0.5 * p_half)
 
 
 # Closed-form random-guess baselines for the three attacks
@@ -626,6 +691,7 @@ def lemma3_random_baseline_attacks(
     n_universe_clips: int,
     num_frames:       int,
     clip_len:         int = CLIP_LEN,
+    a1_window:        int = 0,
 ) -> Dict[str, float]:
     """
     Closed-form per-guess baselines for the three temporal MIA attacks
@@ -646,7 +712,16 @@ def lemma3_random_baseline_attacks(
         dominated by the half-credit term for clip_len >> T.
     """
     p_exact = num_frames / clip_len
-    a1_per_guess = 0.5 * (1.0 - p_exact) + 1.0 * p_exact
+    # Attack 1 under the half-rule: every guess is same-clip, so floor 0.5.
+    a1_per_guess_half = 0.5 * (1.0 - p_exact) + 1.0 * p_exact
+    # Attack 1 under the window rule: only same-clip guesses within
+    # +-window of a true frame get half-credit.
+    if a1_window > 0:
+        a1_per_guess_window = attack1_window_baseline(
+            num_frames=num_frames, clip_len=clip_len, window=a1_window,
+        )
+    else:
+        a1_per_guess_window = a1_per_guess_half  # window=0 == "half" rule
 
     a2_top1 = 1.0 / max(1, n_universe_clips)
 
@@ -657,9 +732,10 @@ def lemma3_random_baseline_attacks(
     a3_per_guess = 1.0 * a3_p_exact + 0.5 * a3_p_same_clip_only
 
     return {
-        "attack1_per_guess": float(a1_per_guess),
-        "attack2_top1":      float(a2_top1),
-        "attack3_per_guess": float(a3_per_guess),
+        "attack1_per_guess":        float(a1_per_guess_half),
+        "attack1_per_guess_window": float(a1_per_guess_window),
+        "attack2_top1":             float(a2_top1),
+        "attack3_per_guess":        float(a3_per_guess),
     }
 
 
@@ -693,6 +769,7 @@ def run_attack(
     n_trials:         int = 5,
     n_clip_candidates:    int = 50,
     n_frame_candidates_a3: int = 2000,
+    a1_window:     int = 2,
     num_frames:    int = 16,
     size:          int = 112,
     clip_len:      int = CLIP_LEN,
@@ -707,6 +784,10 @@ def run_attack(
                           clips (always includes the true target).
       n_frame_candidates_a3 — Attack 3 subsamples this many universe
                           rows as candidate (clip, index) pairs.
+      a1_window         — half-credit window (in indices) for Attack 1's
+                          temporal-proximity rule. 0 disables (reverts to
+                          "same-clip = 0.5"). Default 2 = +-2 indices on
+                          a CLIP_LEN=100 clip, i.e. 2% on each side.
     """
     rng = np.random.default_rng(seed)
     n_clips = len(clip_paths)
@@ -755,7 +836,7 @@ def run_attack(
     else:
         a3_pool = np.arange(N_total)
 
-    a1_scores, a1_int_scores = [], []
+    a1_scores, a1_int_scores, a1_window_scores = [], [], []
     a2_scores = []
     a2_actual_n_candidates = []   # may be < n_clip_candidates for sparse classes
     a3_scores, a3_int_scores = [], []
@@ -816,9 +897,33 @@ def run_attack(
                 trial, target_rows, counterfactual_rows
             )
 
-            # ---- Attack 2: top-1 over candidate clips ----
+            # ---- Attack 2: per-candidate LiRA top-1 over candidate clips ----
+            # Each candidate c gets its own counterfactual: T same-class
+            # frames not from c's clip. The true target's slot in
+            # candidate_cfs is set to the residual's counterfactual so its
+            # pred_diff matches the residual exactly (max LR there).
+            candidate_cfs = np.empty(
+                (len(candidate_clip_ids), num_frames), dtype=int
+            )
+            for ci, cid in enumerate(candidate_clip_ids):
+                if int(cid) == target_vid:
+                    candidate_cfs[ci] = counterfactual_rows
+                    continue
+                # T same-class frames not from candidate clip cid.
+                cid_rows = clip_row_indices[int(cid)]
+                non_cid = np.setdiff1d(
+                    same_class_rows, cid_rows, assume_unique=False
+                )
+                if len(non_cid) >= num_frames:
+                    candidate_cfs[ci] = trial_rng.choice(
+                        non_cid, size=num_frames, replace=False
+                    )
+                else:
+                    candidate_cfs[ci] = trial_rng.choice(
+                        non_cid, size=num_frames, replace=True
+                    )
             a2_lr = lira_score_clip_candidates(
-                trial, target_pre, candidate_clip_rows, sigma
+                trial, target_pre, candidate_clip_rows, candidate_cfs, sigma
             )
             top1 = int(np.argmax(a2_lr))
             a2_scores.append(1.0 if top1 == true_target_index_among_candidates else 0.0)
@@ -850,6 +955,7 @@ def run_attack(
             if full is None:
                 a1_scores.append(float("nan"))
                 a1_int_scores.append(float("nan"))
+                a1_window_scores.append(float("nan"))
                 continue
 
             # Each candidate frame f at index j contributes a single-frame
@@ -879,18 +985,25 @@ def run_attack(
             a1_int_scores.append(
                 compute_weighted_score(a1_guesses, truth, weight_rule="integer")
             )
+            a1_window_scores.append(
+                compute_weighted_score(
+                    a1_guesses, truth, weight_rule="window", window=a1_window,
+                )
+            )
 
         if (ti + 1) % max(1, len(targets_meta) // 5) == 0:
             print(f"    target {ti + 1}/{len(targets_meta)} done")
 
     a1_scores = np.array(a1_scores, dtype=float)
     a1_int_scores = np.array(a1_int_scores, dtype=float)
+    a1_window_scores = np.array(a1_window_scores, dtype=float)
     a2_scores = np.array(a2_scores, dtype=float)
     a3_scores = np.array(a3_scores, dtype=float)
     a3_int    = np.array(a3_int_scores, dtype=float)
 
     base = lemma3_random_baseline_attacks(
         n_universe_clips=n_clips, num_frames=num_frames, clip_len=clip_len,
+        a1_window=a1_window,
     )
 
     # Normalize: per-guess for Attack 1 and Attack 3 (divide by num_frames),
@@ -899,6 +1012,8 @@ def run_attack(
     a1_norm = float(np.nanmean(a1_scores) / num_frames) if n_a1_valid > 0 else float("nan")
     a1_std  = float(np.nanstd(a1_scores)  / num_frames) if n_a1_valid > 0 else float("nan")
     a1_int_norm = float(np.nanmean(a1_int_scores) / num_frames) if n_a1_valid > 0 else float("nan")
+    a1_window_norm = float(np.nanmean(a1_window_scores) / num_frames) if n_a1_valid > 0 else float("nan")
+    a1_window_std  = float(np.nanstd(a1_window_scores)  / num_frames) if n_a1_valid > 0 else float("nan")
     a2_norm = float(a2_scores.mean()) if len(a2_scores) else float("nan")
     a2_std  = float(a2_scores.std())  if len(a2_scores) else float("nan")
     a3_norm = float(a3_scores.mean() / num_frames) if len(a3_scores) else float("nan")
@@ -917,13 +1032,15 @@ def run_attack(
     a2_baseline_topN = 1.0 / max(1.0, a2_actual_mean)
 
     print(f"\n--- Attack Results (k={k}, sigma={sigma}) ---")
-    print(f"Attack 1 (index inference, half) : {a1_norm:.4f}   "
+    print(f"Attack 1 (index inference, half  ): {a1_norm:.4f}   "
           f"(baseline {base['attack1_per_guess']:.4f})")
-    print(f"Attack 2 (clip inference, top-1) : {a2_norm:.4f}   "
+    print(f"Attack 1 (index inference, win+-{a1_window}): {a1_window_norm:.4f}   "
+          f"(baseline {base['attack1_per_guess_window']:.4f})")
+    print(f"Attack 2 (clip inference, top-1  ): {a2_norm:.4f}   "
           f"(baseline {a2_baseline_topN:.4f}, |cands|~{a2_actual_mean:.1f})")
-    print(f"Attack 3 (frame-level MIA, half) : {a3_norm:.4f}   "
+    print(f"Attack 3 (frame-level MIA, half  ): {a3_norm:.4f}   "
           f"(baseline {base['attack3_per_guess']:.6f})")
-    print(f"Attack 3 (frame-level MIA, int)  : {a3_int_norm:.4f}")
+    print(f"Attack 3 (frame-level MIA, int   ): {a3_int_norm:.4f}")
 
     return {
         "k": k, "sigma": sigma,
@@ -936,10 +1053,14 @@ def run_attack(
         "clip_len":               int(clip_len),
         "num_frames":             int(num_frames),
         # Attack 1
-        "attack1_score_half":      a1_norm,
-        "attack1_score_half_std":  a1_std,
-        "attack1_score_int":       a1_int_norm,
-        "attack1_baseline_half":   base["attack1_per_guess"],
+        "attack1_score_half":         a1_norm,
+        "attack1_score_half_std":     a1_std,
+        "attack1_score_int":          a1_int_norm,
+        "attack1_score_window":       a1_window_norm,
+        "attack1_score_window_std":   a1_window_std,
+        "attack1_window":             int(a1_window),
+        "attack1_baseline_half":      base["attack1_per_guess"],
+        "attack1_baseline_window":    base["attack1_per_guess_window"],
         # Attack 2 (top-1 over n_clip_candidates same-class clips, restricted)
         "attack2_top1":            a2_norm,
         "attack2_top1_std":        a2_std,
@@ -984,6 +1105,12 @@ if __name__ == "__main__":
         "--n-frame-candidates-a3", type=int, default=2000,
         help="Attack 3 universe subsample size (default: 2000). "
              "True target rows are always added on top.",
+    )
+    parser.add_argument(
+        "--a1-window", type=int, default=2,
+        help="Attack 1 half-credit window in indices (default: 2 = "
+             "+-2 indices on a CLIP_LEN=100 clip = 2%% per side). "
+             "Set 0 to disable (revert to 'same-clip = 0.5' rule).",
     )
     parser.add_argument(
         "--results-dir", type=str, default="./results",
@@ -1074,6 +1201,7 @@ if __name__ == "__main__":
             n_targets=args.n_targets, n_trials=args.n_trials,
             n_clip_candidates=args.n_clip_candidates,
             n_frame_candidates_a3=args.n_frame_candidates_a3,
+            a1_window=args.a1_window,
             num_frames=NUM_FRAMES, size=SIZE, clip_len=CLIP_LEN,
             seed=SEED + i,
         )
