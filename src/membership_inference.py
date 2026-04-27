@@ -124,12 +124,13 @@ def build_frame_pool(
 
     U_list, labels_list, fidx_list, cid_list, paths_list = [], [], [], [], []
 
-    for clip_id, (rel_path, label) in enumerate(train_list):
+    for src_idx, (rel_path, label) in enumerate(train_list):
         video_path = os.path.join(video_root, rel_path)
-        # Per-clip rng deterministic in (clip_id, seed) — required for the
+        # Per-clip rng deterministic in (src_idx, seed) — required for the
         # cache-validity invariant: the universe must be identical across
-        # candidate evaluations within a trial.
-        clip_rng = np.random.default_rng(seed * (1 << 20) + clip_id)
+        # candidate evaluations within a trial. We seed off the train_list
+        # position so skips don't shift the rng for later clips.
+        clip_rng = np.random.default_rng(seed * (1 << 20) + src_idx)
         try:
             frames, fidxs = load_video_frames_gray(
                 video_path, num_frames=num_frames, size=size,
@@ -139,6 +140,9 @@ def build_frame_pool(
             print(f"  Skipping {rel_path}: {e}")
             continue
 
+        # Stored clip_id is dense in [0, n_kept) so downstream indexing
+        # (per_clip aggregation, clip_row_indices) stays in-bounds.
+        clip_id = len(paths_list)
         T = frames.shape[0]
         U_list.append(frames)
         labels_list.append(np.full(T, label, dtype=int))
@@ -146,8 +150,8 @@ def build_frame_pool(
         cid_list.append(np.full(T, clip_id, dtype=int))
         paths_list.append(rel_path)
 
-        if (clip_id + 1) % 200 == 0:
-            print(f"  Loaded {clip_id + 1}/{len(train_list)} videos")
+        if (src_idx + 1) % 200 == 0:
+            print(f"  Loaded {src_idx + 1}/{len(train_list)} videos")
 
     U = np.concatenate(U_list, axis=0).astype(np.float32)
     labels = np.concatenate(labels_list, axis=0)
