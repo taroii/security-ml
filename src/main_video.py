@@ -422,18 +422,41 @@ def embed_dataset(
 
 # Dataset-agnostic pipeline
 def stratified_subset(X, y, n, c, seed):
+    """Stratified subset of n samples (n0 = n/c per class).
+
+    Classes with fewer than n0 surviving clips (e.g. after the CLIP_LEN
+    length filter) are oversampled with replacement so c and n0 remain
+    fixed; the affected classes are listed in a single warning line.
+    """
     assert n % c == 0, "n must be divisible by number of classes"
     n0 = n // c
     g = torch.Generator().manual_seed(seed)
     idxs = []
+    short_classes = []
     for cls in range(c):
         cls_idx = torch.where(y == cls)[0]
-        if len(cls_idx) < n0:
+        if len(cls_idx) == 0:
             raise ValueError(
-                f"Class {cls} has only {len(cls_idx)} samples, need {n0}."
+                f"Class {cls} has 0 samples after filtering; cannot sample."
             )
-        perm = cls_idx[torch.randperm(len(cls_idx), generator=g)]
-        idxs.append(perm[:n0])
+        if len(cls_idx) < n0:
+            short_classes.append((cls, len(cls_idx)))
+            base = cls_idx[torch.randperm(len(cls_idx), generator=g)]
+            extra_n = n0 - len(cls_idx)
+            extra_pos = torch.randint(
+                0, len(cls_idx), (extra_n,), generator=g
+            )
+            extra = cls_idx[extra_pos]
+            idxs.append(torch.cat([base, extra], dim=0))
+        else:
+            perm = cls_idx[torch.randperm(len(cls_idx), generator=g)]
+            idxs.append(perm[:n0])
+    if short_classes:
+        summary = ", ".join(f"cls{c_}: {n_}" for c_, n_ in short_classes)
+        print(
+            f"  [stratified_subset] WARNING: {len(short_classes)} class(es) "
+            f"had < {n0} clips; oversampled with replacement -> {summary}"
+        )
     idx = torch.cat(idxs, dim=0)
     return X[idx], y[idx]
 
