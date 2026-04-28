@@ -29,7 +29,7 @@ pip3 install -r requirements.txt
 
 ## Running the pipeline
 
-The full sweep (membership-inference attacks, accuracy sweep, and figures) is driven by a single script:
+The full sweep (membership-inference attacks, downstream classification accuracy sweep, and figures) is driven by a single script:
 
 ```
 bash run_temporal_mia.sh
@@ -87,25 +87,4 @@ Examples:
 ```
 N_TARGETS=50 N_TRIALS=10 bash run_temporal_mia.sh mia
 K_VALUES="0 1" SIGMAS="0.01 0.10" bash run_temporal_mia.sh
-```
-
-## Repository layout
-
-```
-src/                            pipeline source
-  membership_inference.py       Attack 1/2/3 implementations
-  main_video.py                 downstream Transformer classifier (accuracy)
-  figure1_prior_success.py      Figure 1 (standalone analytical plot)
-  figure2_mia_robustness.py     Figure 2
-  figure3_integer_vs_half.py    Figure 3
-  figure4_pareto.py             Figure 4
-  figure5_visual_obfuscation.py Figure 5 (standalone pixel-space visualization)
-  merge_results.py              merge per-cell MIA CSVs
-  merge_accuracy.py             merge per-cell accuracy CSVs
-results/                        per-cell MIA CSVs (attack_k*_sigma*.csv)
-accuracy_results/               per-cell accuracy CSVs (acc_k*_sigma*.csv, baseline.csv)
-images/                         paper figures (fig2/3/4)
-logs/                           per-cell stdout/stderr from each run
-old/                            superseded scripts and figures (kept for reference)
-run_temporal_mia.sh             pipeline driver
 ```
