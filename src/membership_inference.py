@@ -840,6 +840,7 @@ def run_attack(
     a2_scores = []
     a2_actual_n_candidates = []   # may be < n_clip_candidates for sparse classes
     a3_scores, a3_int_scores = [], []
+    a3_pool_sizes = []   # |a3_pool ∪ target_rows| per (target, trial) for the operational baseline
 
     print(
         f"  Running {n_trials} trials x {len(targets_meta)} targets "
@@ -935,6 +936,7 @@ def run_attack(
             a3_pool_with_truth = np.unique(
                 np.concatenate([a3_pool, target_rows])
             )
+            a3_pool_sizes.append(int(len(a3_pool_with_truth)))
             a3_lr = lira_score_frame_candidates(
                 trial, target_pre, a3_pool_with_truth, sigma
             )
@@ -1031,15 +1033,28 @@ def run_attack(
     )
     a2_baseline_topN = 1.0 / max(1.0, a2_actual_mean)
 
+    # Operational Attack 3 baseline: random adversary picks T uniformly
+    # from the same subsampled pool the empirical attack ranks. Per-guess
+    # P(exact) = T / |pool|, and same-clip-not-exact in the pool is 0
+    # (target's clip contributes only T rows to the universe — all in
+    # target_rows — so half / integer / window baselines coincide).
+    a3_pool_mean_size = (
+        float(np.mean(a3_pool_sizes)) if a3_pool_sizes
+        else float(n_frame_candidates_a3 + num_frames)
+    )
+    a3_baseline_pool = float(num_frames) / max(1.0, a3_pool_mean_size)
+
     print(f"\n--- Attack Results (k={k}, sigma={sigma}) ---")
     print(f"Attack 1 (index inference, half  ): {a1_norm:.4f}   "
           f"(baseline {base['attack1_per_guess']:.4f})")
     print(f"Attack 1 (index inference, win+-{a1_window}): {a1_window_norm:.4f}   "
           f"(baseline {base['attack1_per_guess_window']:.4f})")
     print(f"Attack 2 (clip inference, top-1  ): {a2_norm:.4f}   "
-          f"(baseline {a2_baseline_topN:.4f}, |cands|~{a2_actual_mean:.1f})")
+          f"(operational baseline {a2_baseline_topN:.6f}, "
+          f"|cands|~{a2_actual_mean:.1f}; universe {base['attack2_top1']:.6f})")
     print(f"Attack 3 (frame-level MIA, half  ): {a3_norm:.4f}   "
-          f"(baseline {base['attack3_per_guess']:.6f})")
+          f"(operational baseline {a3_baseline_pool:.6f}, "
+          f"|pool|~{a3_pool_mean_size:.1f}; universe {base['attack3_per_guess']:.6f})")
     print(f"Attack 3 (frame-level MIA, int   ): {a3_int_norm:.4f}")
 
     return {
@@ -1062,16 +1077,19 @@ def run_attack(
         "attack1_baseline_half":      base["attack1_per_guess"],
         "attack1_baseline_window":    base["attack1_per_guess_window"],
         # Attack 2 (top-1 over n_clip_candidates same-class clips, restricted)
-        "attack2_top1":            a2_norm,
-        "attack2_top1_std":        a2_std,
-        "attack2_baseline":        a2_baseline_topN,
-        "attack2_actual_n_candidates": a2_actual_mean,
-        # Attack 3
-        "attack3_score_half":      a3_norm,
-        "attack3_score_half_std":  a3_std,
-        "attack3_score_int":       a3_int_norm,
-        "attack3_score_int_std":   a3_int_std,
-        "attack3_baseline_half":   base["attack3_per_guess"],
+        "attack2_top1":                  a2_norm,
+        "attack2_top1_std":              a2_std,
+        "attack2_baseline":              a2_baseline_topN,
+        "attack2_actual_n_candidates":   a2_actual_mean,
+        "attack2_baseline_universe":     base["attack2_top1"],
+        # Attack 3 (top-T over subsampled pool ∪ target_rows)
+        "attack3_score_half":            a3_norm,
+        "attack3_score_half_std":        a3_std,
+        "attack3_score_int":             a3_int_norm,
+        "attack3_score_int_std":         a3_int_std,
+        "attack3_baseline_half":         a3_baseline_pool,
+        "attack3_actual_pool_size":      a3_pool_mean_size,
+        "attack3_baseline_universe":     base["attack3_per_guess"],
     }
 
 
