@@ -1,0 +1,2 @@
+k,sigma,accuracy_baseline,accuracy_obfuscated,accuracy_gap,n,epochs,seed
+5,0.5000,60.1861,43.9525,16.2336,5050,50,42
