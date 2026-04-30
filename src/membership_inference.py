@@ -355,6 +355,18 @@ def precompute_target_lira(
     }
 
 
+def _inv_sigma2(sigma: float) -> float:
+    """Inverse-variance scaling for LiRA scores.
+
+    At sigma=0 the standard LR formula divides by zero; we drop the rescale
+    entirely. Removing 1/sigma^2 is a monotone transform of all candidate
+    scores within a single attack call, so top-1 and top-K rankings are
+    unchanged. Absolute scores at sigma=0 are not directly comparable to
+    scores at sigma>0; only their rankings (which is all the attacks use).
+    """
+    return 1.0 if sigma == 0.0 else 1.0 / (sigma ** 2)
+
+
 def lira_score_clip_candidates(
     trial:               Dict,
     target_pre:          Dict,
@@ -412,7 +424,7 @@ def lira_score_clip_candidates(
             )                                                       # (T, d)
             dot = float((residual_at_c * slot_diff_W).sum())
             nrm = float((slot_diff_W * slot_diff_W).sum())
-            scores[ci] = (dot - 0.5 * nrm) / (sigma ** 2)
+            scores[ci] = (dot - 0.5 * nrm) * _inv_sigma2(sigma)
         return scores
 
     # k>=1: per-candidate, find which mixed rows touch any of c_rows
@@ -431,7 +443,7 @@ def lira_score_clip_candidates(
 
         dot = float((residual * pred_perm).sum())
         nrm = float((pred_perm * pred_perm).sum())
-        scores[ci] = (dot - 0.5 * nrm) / (sigma ** 2)
+        scores[ci] = (dot - 0.5 * nrm) * _inv_sigma2(sigma)
 
     return scores
 
@@ -524,7 +536,7 @@ def lira_score_frame_candidates(
         (alpha2_sum * cand_norm2 - 2.0 * cross + cf_norm2_sum) * (inv_T ** 2)
     )
 
-    return (dot_terms - 0.5 * nrm_terms) / (sigma ** 2)
+    return (dot_terms - 0.5 * nrm_terms) * _inv_sigma2(sigma)
 
 
 def _lira_score_external_uw(
@@ -594,7 +606,7 @@ def _lira_score_external_uw(
         (alpha2_sum * cand_norm2 - 2.0 * cross + cf_norm2_sum) * (inv_T ** 2)
     )
 
-    return (dot_terms - 0.5 * nrm_terms) / (sigma ** 2)
+    return (dot_terms - 0.5 * nrm_terms) * _inv_sigma2(sigma)
 
 
 # Weighted scoring on (clip, index) pairs.
