@@ -217,11 +217,27 @@ def precompute_trial(
     d:      int,
     sigma:  float,
     rng:    np.random.Generator,
+    noise_mode:     str = "iid",
+    clip_ids:       np.ndarray = None,
+    noise_clip_frac: float = 0.5,
 ) -> Dict:
     """
     Sample (W, B, perm, M_mix) once for this MC trial; precompute UW and
     a partial obfuscation o_full that omits the per-target zeroing. All
     per-target work later only adjusts for the target rows.
+
+    noise_mode:
+      "iid"  -- independent per-row Gaussian noise (the paper's mechanism).
+      "clip" -- temporally CORRELATED noise: each row's noise is
+                sqrt(1 - f)*eps_row + sqrt(f)*eta_{clip(row)}, where eta is a
+                per-clip shared draw and f = noise_clip_frac. The total
+                per-row variance is sigma^2 for ANY f (fair comparison to
+                "iid" at matched noise budget), but same-clip rows now share
+                a common noise component. This is the natural defence for
+                models that jointly process a clip's frames -- the setting
+                Reviewer A flagged as unaddressed. Only defined for k=0
+                (where each mechanism row is exactly one frame, so "clip"
+                is well-posed); requires clip_ids.
     """
     N_total, d0 = U.shape
 
@@ -239,7 +255,26 @@ def precompute_trial(
     inv_perm[perm] = np.arange(m)
 
     W = rng.standard_normal((d0, d)).astype(np.float32) / np.sqrt(d)
-    B = rng.standard_normal((m, d)).astype(np.float32) * sigma
+
+    if noise_mode == "iid":
+        B = rng.standard_normal((m, d)).astype(np.float32) * sigma
+    elif noise_mode == "clip":
+        if k != 0:
+            raise ValueError("noise_mode='clip' is only defined for k=0 "
+                             "(one mechanism row per frame).")
+        if clip_ids is None:
+            raise ValueError("noise_mode='clip' requires clip_ids.")
+        f = float(noise_clip_frac)
+        assert 0.0 <= f <= 1.0
+        # per-row independent part + per-clip shared part, matched variance.
+        eps = rng.standard_normal((m, d)).astype(np.float32)
+        n_clips = int(clip_ids.max()) + 1
+        eta = rng.standard_normal((n_clips, d)).astype(np.float32)
+        shared = eta[clip_ids]  # (m, d): each row gets its clip's shared draw
+        B = sigma * (np.sqrt(1.0 - f) * eps + np.sqrt(f) * shared)
+        B = B.astype(np.float32)
+    else:
+        raise ValueError(f"unknown noise_mode {noise_mode}")
 
     UW = U @ W   # (N_total, d): the dominant per-trial cost
 
@@ -256,6 +291,7 @@ def precompute_trial(
         "UW": UW, "W": W, "B": B, "perm": perm, "inv_perm": inv_perm,
         "records": records, "coef": coef, "m": m, "k": k, "c": c,
         "sigma": sigma, "Xm_full_W": Xm_full_W, "o_full": o_full,
+        "noise_mode": noise_mode,
     }
 
 
@@ -786,6 +822,8 @@ def run_attack(
     size:          int = 112,
     clip_len:      int = CLIP_LEN,
     seed:          int = 0,
+    noise_mode:      str = "iid",
+    noise_clip_frac: float = 0.5,
 ) -> dict:
     """LiRA-style three-attack temporal MIA.
 
@@ -890,7 +928,11 @@ def run_attack(
             trial_rng = np.random.default_rng(
                 seed * 10**6 + ti * 1000 + trial_idx
             )
-            trial = precompute_trial(U, labels, c, k, d, sigma, trial_rng)
+            trial = precompute_trial(
+                U, labels, c, k, d, sigma, trial_rng,
+                noise_mode=noise_mode, clip_ids=clip_ids,
+                noise_clip_frac=noise_clip_frac,
+            )
             UW = trial["UW"]
             W = trial["W"]
 
@@ -1151,6 +1193,17 @@ if __name__ == "__main__":
         default=[0.01, 0.05, 0.10, 0.50],
         help="Noise standard deviations to sweep",
     )
+    parser.add_argument(
+        "--noise-mode", type=str, default="iid", choices=["iid", "clip"],
+        help="Mechanism noise structure: 'iid' (paper) or 'clip' "
+             "(temporally correlated per-clip noise; k=0 only).",
+    )
+    parser.add_argument(
+        "--noise-clip-frac", type=float, default=0.5,
+        help="For --noise-mode clip: fraction of noise variance that is "
+             "clip-shared (0=iid, 1=fully shared within a clip). "
+             "Total per-row variance is sigma^2 regardless.",
+    )
     args = parser.parse_args()
 
     SEED = 42
@@ -1211,9 +1264,10 @@ if __name__ == "__main__":
 
     os.makedirs(args.results_dir, exist_ok=True)
 
+    noise_tag = "" if args.noise_mode == "iid" else f"_{args.noise_mode}{args.noise_clip_frac:g}"
     for i, sigma in enumerate(args.sigmas):
         out_path = os.path.join(
-            args.results_dir, f"attack_k{args.k}_sigma{sigma:.4f}.csv"
+            args.results_dir, f"attack_k{args.k}_sigma{sigma:.4f}{noise_tag}.csv"
         )
         if os.path.exists(out_path):
             print(f"\n[skip] {out_path} already exists")
@@ -1234,7 +1288,10 @@ if __name__ == "__main__":
             a1_window=args.a1_window,
             num_frames=NUM_FRAMES, size=SIZE, clip_len=CLIP_LEN,
             seed=SEED + i,
+            noise_mode=args.noise_mode, noise_clip_frac=args.noise_clip_frac,
         )
+        result["noise_mode"] = args.noise_mode
+        result["noise_clip_frac"] = args.noise_clip_frac
 
         df = pd.DataFrame([result])
         df.to_csv(out_path, index=False, float_format="%.6f")

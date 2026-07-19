@@ -229,3 +229,14 @@ cache/
 *.pt
 data/UCF-101/
 data/ucfTrainTestlist/
+
+# --- Revision work (added for CCS revision push) ---
+.venv-rev/
+.venv-*/
+# keep curated revision docs and result CSVs despite *.md / *.csv rules above
+!revision/
+!revision/**
+!results_revision/
+!results_revision/*.csv
+!paper/
+!paper/**

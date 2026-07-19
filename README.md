@@ -2,6 +2,28 @@
 
 This repo contains the experiments backing our paper on temporal membership-inference attacks (MIA) against learnable obfuscation of video data. The pipeline sweeps the obfuscation knobs `(k, sigma)`, scores three MIA variants on the resulting embeddings, and measures the downstream classifier accuracy gap.
 
+## CCS revision (round-1 response)
+
+The `revision/` directory and the new scripts below address the CCS 2026-B
+reviews. The central criticism was that the paper motivated itself with
+temporal correlation but modeled it only in the reward, not the sampling.
+The revision adds:
+
+- **`src/two_level_prior.py`** — a two-level clip-then-frame *compound prior*
+  (validated against Monte Carlo and recovering the paper's Lemma 3 at `G=1`),
+  showing clustered membership inflates the adversary's upper-tail success.
+- **`src/correlation_aware_attack.py`** — a clip-aggregated MI attack that pools
+  per-frame evidence, vs. the paper's blind per-frame attack, on UCF-101.
+- **`src/synthetic_correlation.py`** — a controlled AR(1) study (dial `rho`)
+  isolating graded leakage, the aware-vs-blind gap, and correlated noise.
+- **`src/membership_inference.py`** — now supports `--noise-mode {iid,clip}`
+  (correlated per-clip noise; backward compatible, default `iid`).
+
+Deliverables: `revision/REVISION_PLAN.md` (comment-by-comment mapping),
+`revision/response_to_reviewers.md`, and `paper/main.tex` (revised paper source;
+see `paper/REVISION_NOTES.md` for how to integrate). New figures:
+`images/fig_two_level_prior.pdf`, `images/fig_synthetic_correlation.pdf`.
+
 ## Setup
 
 ### 1. Create a conda environment

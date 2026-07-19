@@ -1,0 +1,61 @@
+[filter] train: loaded cached length filter (7954 kept, 1583 dropped, clip_len=100)
+Loaded frame pool from cache: /Users/rainchai/Desktop/security-ml/ucf101_frame_pool_gray_random_len100.npz
+Restricted universe to 400 clips, 6400 frames (d0=12544).
+  correlation-aware: 5 trials x 15 targets (k=0, sigma=0.05, agg=sum)
+    target 3/15
+    target 6/15
+    target 9/15
+    target 12/15
+    target 15/15
+
+  --- k=0, sigma=0.05 ---
+  Attack 3 blind (half)     : 0.5517
+  Attack 3 clip-aware (half): 0.5733   (gain +0.0217, 1.04x)
+  Attack 3 blind (int)      : 0.5517
+  Attack 3 clip-aware (int) : 0.5733   (gain +0.0217)
+  target-clip top-1 acc     : 0.5733   (blind plurality-clip acc 0.5867)
+  target-clip mean rank     : 6.4   (median 1, of 400 clips)
+  correlation-aware: 5 trials x 15 targets (k=0, sigma=0.1, agg=sum)
+    target 3/15
+    target 6/15
+    target 9/15
+    target 12/15
+    target 15/15
+
+  --- k=0, sigma=0.1 ---
+  Attack 3 blind (half)     : 0.4458
+  Attack 3 clip-aware (half): 0.4667   (gain +0.0208, 1.05x)
+  Attack 3 blind (int)      : 0.4458
+  Attack 3 clip-aware (int) : 0.4667   (gain +0.0208)
+  target-clip top-1 acc     : 0.4667   (blind plurality-clip acc 0.4667)
+  target-clip mean rank     : 4.6   (median 4, of 400 clips)
+  correlation-aware: 5 trials x 15 targets (k=0, sigma=0.25, agg=sum)
+    target 3/15
+    target 6/15
+    target 9/15
+    target 12/15
+    target 15/15
+
+  --- k=0, sigma=0.25 ---
+  Attack 3 blind (half)     : 0.4825
+  Attack 3 clip-aware (half): 0.4800   (gain -0.0025, 0.99x)
+  Attack 3 blind (int)      : 0.4825
+  Attack 3 clip-aware (int) : 0.4800   (gain -0.0025)
+  target-clip top-1 acc     : 0.4800   (blind plurality-clip acc 0.5067)
+  target-clip mean rank     : 5.7   (median 2, of 400 clips)
+  correlation-aware: 5 trials x 15 targets (k=0, sigma=0.5, agg=sum)
+    target 3/15
+    target 6/15
+    target 9/15
+    target 12/15
+    target 15/15
+
+  --- k=0, sigma=0.5 ---
+  Attack 3 blind (half)     : 0.4933
+  Attack 3 clip-aware (half): 0.5333   (gain +0.0400, 1.08x)
+  Attack 3 blind (int)      : 0.4933
+  Attack 3 clip-aware (int) : 0.5333   (gain +0.0400)
+  target-clip top-1 acc     : 0.5333   (blind plurality-clip acc 0.5333)
+  target-clip mean rank     : 3.5   (median 1, of 400 clips)
+
+Wrote ./results_revision/corr_aware_k0_sum.csv
