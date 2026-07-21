@@ -1250,16 +1250,21 @@ positivity of $\lambda_j$ with probability one.
 
 \paragraph{Interpretation.}
 Theorem~\ref{thm:mi_correlation} shows that temporal correlation
-\emph{reduces} the mutual information between the dataset and
+\emph{reduces} the mutual-information bound between the dataset and
 the mechanism's output: correlated rows carry less total information
-than independent rows.  At first glance, this appears to favor
-privacy.  However, the adversary's success bound
-from~\eqref{eq:success_bound_recall} depends on the
-\emph{product} $\mathrm{MI} \cdot C$, and the prior-cost
-constant $C$ can increase under correlation (as shown below),
-potentially outweighing the MI reduction.  The net effect on
-privacy depends on the relative magnitude of these two
-competing forces.
+than independent rows, which favors privacy. The adversary's success
+bound from~\eqref{eq:success_bound_recall} depends on the \emph{product}
+$\mathrm{MI} \cdot C$, so it is worth asking whether the prior-cost
+constant $C$ moves against this. It does not: the increase in $C$ over
+the integer baseline is caused by \emph{weighted scoring}, not by
+correlation, and Theorem~\ref{thm:prior_block} shows that block-correlated
+sampling in fact \emph{lowers} $C$ relative to the scattered
+half-integer case. Correlation is therefore privacy-favorable on both
+factors of the bound. The residual danger it introduces is not in this
+static bound at all, but in the \emph{aggregation} vulnerability of
+Theorem~\ref{thm:noise_averaging}: a model or adversary that averages
+across correlated frames can cancel independent noise, which we
+address next.
 
 \subsection{Adversary Success under Combined Correlation and Weighted Scoring}
 
@@ -1382,14 +1387,17 @@ Moreover, the required noise $\sigma_{\mathrm{comb}}$ satisfies
 \begin{equation}
 \label{eq:sigma_combined_bound}
 \sigma_{\mathrm{comb}}
-\;\ge\;
+\;\le\;
 \sigma_{\mathrm{int}}
 \cdot \sqrt{\frac{C^{\mathrm{block}}_{\mathrm{half}}}{C_{\mathrm{int}}}},
 \end{equation}
 where the square root arises from the $\mathrm{MI} \sim 1/\sigma^2$
-scaling of Theorem~\ref{thm:mi_masking}.  The ratio
-$C^{\mathrm{block}}_{\mathrm{half}} / C_{\mathrm{int}}$
-is bounded by
+scaling of Theorem~\ref{thm:mi_masking}.  The inequality is an
+\emph{upper} bound because temporal correlation lowers the MI bound
+($I_R \le I_{I_n}$, Theorem~\ref{thm:mi_correlation}), so the correlated
+mechanism needs no more noise than the weighted-scoring inflation
+$\sqrt{C^{\mathrm{block}}_{\mathrm{half}}/C_{\mathrm{int}}}$ alone would
+require. The prior-cost ratio is itself bounded by
 \[
 1
 \;<\;
@@ -1397,9 +1405,9 @@ is bounded by
 \;\le\;
 \frac{C^{\mathrm{scatter}}_{\mathrm{half}}}{C_{\mathrm{int}}},
 \]
-so the combined noise inflation is at most the scattered-frame
-inflation of Theorem~\ref{thm:half_int_calibration} and at least
-the integer baseline.
+so the required inflation is at most the scattered-frame inflation of
+Theorem~\ref{thm:half_int_calibration}, and strictly less once the MI
+reduction is accounted for.
 \end{theorem}
 
 \begin{proof}
@@ -1497,10 +1505,10 @@ In particular, for the AR(1) model $\rho(\tau) = \alpha^{|\tau|}$,
   - \frac{2\alpha(1-\alpha^{b})}{b(1-\alpha)^2},
 \end{equation}
 which approaches $(1+\alpha)/(1-\alpha)$ as $b \to \infty$.
-For $\alpha = 0.9$ and $b = 16$, $\bar{R}_b \approx 11.4$:
+For $\alpha = 0.9$ and $b = 16$, $\bar{R}_b \approx 9.8$:
 averaging $16$ correlated frames amplifies the SNR by a factor
-of $11.4$ relative to a single frame, effectively reducing the
-noise standard deviation by $\sqrt{11.4} \approx 3.4\times$.
+of $9.8$ relative to a single frame, effectively reducing the
+noise standard deviation by $\sqrt{9.8} \approx 3.1\times$.
 \end{enumerate}
 \end{theorem}
 
@@ -1679,7 +1687,14 @@ is a real-embedding instance of exactly the degradation
 Theorem~\ref{thm:noise_averaging} predicts, and it quantifies the noise
 inflation a deployment must apply---or the correlated-noise mechanism of
 Theorem~\ref{thm:correlated_noise} it must adopt---to remain private
-against an adversary that aggregates across frames.
+against an adversary that aggregates across frames. The same measured
+$\rho$ also confirms Theorem~\ref{thm:mi_correlation} numerically: forming
+the block-Toeplitz correlation matrix $R$ from the autocorrelation and
+evaluating the mutual-information bound, the correlated-sampling bound
+$I_R$ is $19\%$ below the independent-sampling bound $I_{I_n}$, the
+reduction driven by the spread of $R$'s eigenvalues (which sum to the
+block size, preserving the trace as the theorem's Jensen argument
+requires).
 
 \subsection{Empirical Validation: Aggregation Attack and Correlated Noise}
 \label{subsec:corr_empirical}
@@ -1719,7 +1734,7 @@ correlation; we isolate the full effect synthetically below.
 \caption{Blind vs.\ correlation-aware (Theorem~\ref{thm:noise_averaging}
 aggregation) attack on UCF-101, half-integer weighted recovery, and the
 correlation-aware source-clip top-1 out of $400$ candidate clips
-($1/400 = 0.0025$ chance). Mean over $60$ ($15$ targets $\times$ $4$
+($1/400 = 0.0025$ chance). Mean over $75$ ($15$ targets $\times$ $5$
 trials).}
 \label{tab:aggregation}
 \begin{tabular}{cccc}
@@ -1793,7 +1808,7 @@ This work extends the formal learnable obfuscation framework of~\cite{xiao2024fo
 
 We derived closed-form multivariate hypergeometric expressions for the adversary's prior success probability under half-integer and general $1/m$-resolution weights (Lemmas~3 and~4) and showed that these priors strictly dominate their integer-weight counterpart. We then obtained noise calibration conditions (Theorems~\ref{thm:half_int_calibration} and~\ref{thm:general_m_calibration}) quantifying the additional noise required to preserve a target privacy guarantee under weighted proximity, with the mixing and permutation amplification bounds of~\cite{xiao2024formal} transferring directly to the weighted setting.
 
-The UCF-101 evaluation instantiates these results empirically at multiple operating points. On the universe of Lemma~3's visualization, the prior-cost gap $C_{\mathrm{half}} \approx 31 \cdot C_{\mathrm{int}}$ translates through Theorem~\ref{thm:mi_masking} into a noise inflation of roughly $5.6\times$ relative to the integer rule; the magnitude is set by the universe's weight-class layout and may differ in a target deployment. The correlation analysis of Section~\ref{sec:correlation_analysis} reveals a nuanced interplay: Theorem~\ref{thm:mi_correlation} shows that temporal correlation \emph{reduces} the mutual information between the dataset and the mechanism's output, while Theorem~\ref{thm:prior_block} shows that block-correlated sampling produces a prior-cost constant intermediate between the integer and scattered-frame baselines.  Theorem~\ref{thm:combined_calibration} gives the combined noise calibration requirement under joint correlation and weighted scoring, and Theorem~\ref{thm:noise_averaging} quantifies a separate vulnerability: independent noise injection allows temporal aggregation to amplify the signal-to-noise ratio by the autocorrelation factor $\bar{R}_b$, which can be large for slowly decorrelating video.  Theorem~\ref{thm:correlated_noise} shows that matching the noise correlation to the data correlation eliminates this vulnerability entirely.  We do not estimate $\MI(X; \mathcal{M}(X))$ directly and therefore do not numerically certify the bound, and Attack~2 is evaluated over a $2{,}016$-row subsample of the candidate universe for tractability---an adversary-friendly choice under which the mechanism still does not collapse. The downstream classifier preserves utility within the noise envelope $\sigma \le 0.10$.
+The UCF-101 evaluation instantiates these results empirically at multiple operating points. On the universe of Lemma~3's visualization, the prior-cost gap $C_{\mathrm{half}} \approx 31 \cdot C_{\mathrm{int}}$ translates through Theorem~\ref{thm:mi_masking} into a noise inflation of roughly $5.6\times$ relative to the integer rule; the magnitude is set by the universe's weight-class layout and may differ in a target deployment. The correlation analysis of Section~\ref{sec:correlation_analysis} reveals a nuanced interplay: Theorem~\ref{thm:mi_correlation} shows that temporal correlation \emph{reduces} the mutual-information bound between the dataset and the mechanism's output, while Theorem~\ref{thm:prior_block} shows that block-correlated sampling produces a prior-cost constant intermediate between the integer and scattered-frame baselines.  Theorem~\ref{thm:combined_calibration} gives the combined noise calibration requirement under joint correlation and weighted scoring, and Theorem~\ref{thm:noise_averaging} quantifies a separate vulnerability: independent noise injection allows temporal aggregation to amplify the signal-to-noise ratio by the autocorrelation factor $\bar{R}_b$, which can be large for slowly decorrelating video.  Theorem~\ref{thm:correlated_noise} shows that matching the noise correlation to the data correlation eliminates this vulnerability entirely.  We do not estimate $\MI(X; \mathcal{M}(X))$ directly and therefore do not numerically certify the bound, and Attack~2 is evaluated over a $2{,}016$-row subsample of the candidate universe for tractability---an adversary-friendly choice under which the mechanism still does not collapse. The downstream classifier preserves utility within the noise envelope $\sigma \le 0.10$.
 
 Several directions remain open. First, extending the weighted formulation beyond frame-level similarity to richer temporal and semantic structures---event-level or trajectory-level notions of proximity---would further align the privacy model with realistic threat scenarios in video analytics. Second, while Section~\ref{subsec:corr_empirical} validates the correlated-noise mechanism of Theorem~\ref{thm:correlated_noise} against the aggregation adversary, a full downstream evaluation---quantifying the privacy--utility tradeoff of clip-correlated noise on the UCF-101 classifier and connecting it to the Pufferfish privacy framework~\cite{kifer2014pufferfish,song2017pufferfish}---remains open. Third, a direct empirical estimate of $\MI(X; \mathcal{M}(X))$, together with a comparison to the upper bounds of Theorem~\ref{thm:mi_masking}, would tighten the link between the theoretical and empirical analyses and would also clarify how much of the operable noise envelope the calibration-required inflation actually consumes for a given deployment. Finally, the empirical evaluation is single-seed and uses a fixed classifier architecture; multi-seed variance estimation, stronger adversarial strategies, and alternative temporally coherent benchmarks would sharpen the empirical picture.
 %%

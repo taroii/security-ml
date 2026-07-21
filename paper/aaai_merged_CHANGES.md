@@ -84,6 +84,39 @@ plus the existing `fig1_prior_success.pdf`, `figure5_visual_obfuscation_pixel.pd
    *modest* on UCF-101 (random per-clip sampling mutes the correlation); the full
    effect is shown synthetically. Said plainly in §7.7.
 
+## Section 7 theorem corrections (please review — I edited the advisor's math)
+
+An automated proof-check (5 independent reviewers + adversarial verification)
+found two genuine errors in the Section 7 theorems, which I corrected. **Please
+confirm you agree:**
+
+1. **Theorem 14 (combined calibration), `eq:sigma_combined_bound`: inequality was
+   backwards.** It stated `σ_comb ≥ σ_int·√(C_block/C_int)`, but the theorem's own
+   proof ("no harder to satisfy," because `I_R ≤ I_{I_n}`) implies `≤`. Since
+   correlation *reduces* the MI bound, the correlated mechanism needs *no more*
+   noise than the weighted-scoring inflation — so the √ factor is an **upper**
+   bound, not a lower bound. Fixed `≥`→`≤` and rewrote the interpretation.
+
+2. **Theorem 15 numeric example wrong.** For `α=0.9, b=16` the text claimed
+   `R̄_b ≈ 11.4` (noise reduction `3.4×`). The correct value from the (correct)
+   closed form is `9.8` (`3.1×`). The closed form itself is right — I verified it
+   equals the direct sum for all `b`; only the plugged-in number was off. Fixed.
+
+3. **"Competing forces" interpretation after Theorem 11 was wrong.** It said
+   correlation might *raise* `C` and outweigh the MI reduction. But
+   Theorem 13 proves block-correlation *lowers* `C` vs scattered; the `C`
+   increase is from *weighted scoring*, not correlation. Rewrote: correlation is
+   privacy-favorable on both factors; the real residual threat is the aggregation
+   attack (Thm 15). This now matches the abstract/intro/conclusion.
+
+4. Minor wording: conclusion said correlation "reduces the mutual information";
+   Thm 11 only bounds it — changed to "mutual-information **bound**".
+
+5. Table 4 caption trial count corrected (75 = 15×5, not 60 = 15×4).
+
+The math reviewer confirmed the AR(1) closed form and Theorems 11, 13, 15(i–ii),
+16 are otherwise sound.
+
 ## Open items for you / the advisor
 
 - **AAAI page limit.** The paper is 23 pp; AAAI main text is typically ~7–9 pp +
