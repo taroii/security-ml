@@ -1,0 +1,1894 @@
+\documentclass[letterpaper]{article} % DO NOT CHANGE THIS
+\usepackage[submission]{aaai2027}  % DO NOT CHANGE THIS
+\usepackage[hyphens]{url}  % DO NOT CHANGE THIS
+\usepackage{graphicx} % DO NOT CHANGE THIS
+\urlstyle{rm} % DO NOT CHANGE THIS
+\def\UrlFont{\rm}  % DO NOT CHANGE THIS
+\usepackage{natbib}  % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\usepackage{caption} % DO NOT CHANGE THIS AND DO NOT ADD ANY OPTIONS TO IT
+\frenchspacing  % DO NOT CHANGE THIS
+
+% Algorithm packages (AAAI recommended)
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+% Recommended for better-looking tables
+\usepackage{booktabs}
+
+% Math packages (not provided by aaai2027.sty)
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsthm}
+\usepackage{enumitem}
+\usepackage{multirow}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\newtheorem{remark}[theorem]{Remark}
+
+% Custom macros
+\newcommand{\MI}{\mathrm{MI}}
+
+\pdfinfo{
+/TemplateVersion (2027.1)
+}
+
+\setcounter{secnumdepth}{2}
+
+\title{Learnable Obfuscation for Temporally Related Video Data}
+\author{
+    Anonymous Author(s)
+}
+\affiliations{
+    Anonymous Institution(s)
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Learnable obfuscation enables model training on encoded data while
+limiting information leakage about the underlying plaintext.  Existing
+formulations, however, are restricted to static datasets of
+independent samples and binary membership inference, in which the
+adversary is scored only on exact recovery.  These assumptions miss a
+leakage channel that arises naturally in video: even a near-miss
+prediction---identifying a frame temporally adjacent to a sensitive
+event---reveals privacy-relevant information, yet binary scoring
+treats it identically to a random guess.
+
+We introduce \emph{weighted membership inference}, a framework in
+which adversarial success is graded by the similarity between the
+adversary's guess and the true dataset.  The sampling model remains
+i.i.d.; the novelty lies in the scoring rule, which assigns partial
+credit for predictions that are close in time or content to a true
+frame.  We instantiate this framework through two concrete attack
+models---index inference and frame-level membership inference---and
+derive closed-form prior success probabilities under half-integer and
+general $1/m$-resolution weight discretizations.  In the half-integer
+model, the adversary earns full weight for an exact
+frame match, half weight for a frame within a fixed temporal window,
+and zero otherwise.  We show that the resulting prior success
+probabilities strictly exceed the binary baseline: on a representative
+universe ($N{=}1000$, $n{=}50$, $m{=}100$), the prior-cost constant
+$C$ inflates by a factor of $31{\times}$ from integer to half-integer
+weights, requiring a $5.6{\times}$ increase in noise standard
+deviation to maintain the same mutual-information-based privacy
+guarantee.
+
+Extending the mutual-information framework of Xiao et
+al.~\cite{xiao2024formal}, we prove that the mixing and permutation
+amplification bounds transfer directly to the weighted setting, and
+derive noise calibration conditions for Gaussian masking mechanisms
+under arbitrary weight resolution.  We further analyze the effect of
+temporal correlation among frame embeddings, showing that while
+correlation \emph{reduces} the mutual-information bound (favoring
+privacy on that axis), it enables a temporal-aggregation attack that
+averages away independent noise---a vulnerability we prove is eliminated
+by matching the noise correlation to the data correlation.  Experiments
+on UCF-101 numerically evaluate the predicted noise inflation, report
+empirical attack scores against closed-form chance baselines at multiple
+operating points under both weighted and binary scoring, measure the
+real frame-embedding autocorrelation ($\alpha \approx 0.84$) that drives
+the aggregation attack, and measure downstream classifier accuracy across
+the noise sweep.
+\end{abstract}
+
+\section{Introduction}
+
+Modern machine learning systems increasingly rely on outsourced computation: data owners transmit datasets to remote service providers that perform model training and inference at scale. While this paradigm enables efficient deployment of sophisticated models, it also introduces substantial privacy risks when the underlying data is sensitive~\cite{shan2018practical}. In particular, video data used in surveillance systems, autonomous driving platforms, teleconferencing services, and edge analytics contains rich temporal and semantic information about individuals and environments~\cite{zhou2019discovering}. Even when the intended task is limited to high-level classification, transmitting raw video streams to an untrusted server may reveal identifiable faces, behaviors, or contextual cues~\cite{yu2018pinto}.
+
+A recent line of work formalizes the problem of \emph{learnable obfuscation}~\cite{christiano2024backdoor}: data may be transformed prior to outsourcing so that (i) the transformed data remains learnable, given a learning framework, for a target task, and (ii) the transformation provably limits information leakage about the original dataset.
+
+In this paradigm, the data owner applies an encoding mechanism $\mathcal{M}$ locally, producing an obfuscated representation $\mathcal{M}(X)$, and only this encoded version is transmitted to an external service provider. The downstream learning algorithm, whether training or inference, is then performed exclusively on $\mathcal{M}(X)$ rather than on the raw dataset $X$. The external party, which may be honest-but-curious or fully adversarial, observes only the encoded data and must operate within this restricted view.
+
+In contrast to fully homomorphic encryption (FHE), which enables exact computation over encrypted data but incurs substantial computational overhead~\cite{gentry2009fhe,gorantala2023fhe}, learnable obfuscation permits structured randomization, such as linear masking~\cite{yala2021neuracrypt} and additive noise~\cite{xiao2025one}, while maintaining statistical learnability of the target task~\cite{xiao2023pacprivacy,xiao2024formal}. The objective is therefore twofold: first, to ensure that a predictor trained or evaluated on $\mathcal{M}(X)$ achieves performance comparable to one trained on $X$; and second, to guarantee that observing $\mathcal{M}(X)$ does not enable an adversary to reliably recover sensitive information about $X$. Xiao \textit{et al.}~\cite{xiao2024formal} establish a formal connection between privacy and utility in this setting by bounding the adversary's inference success solely as a function of the mutual information between the original dataset $X$ and its encoded representation $\mathcal{M}(X)$. In this framework, mutual information serves as a quantitative bridge: it simultaneously upper bounds the adversary's posterior inference advantage and characterizes the extent to which the encoding preserves task-relevant structure.
+
+Existing analyses of learnable obfuscation, however, consider \emph{static} datasets of independent and identically distributed (i.i.d.) samples and evaluate adversarial success under binary membership inference: the adversary either correctly identifies a datapoint in the training set or does not, with no intermediate notion of partial success. Video data challenges this framework along two distinct dimensions.
+
+The first dimension is \textbf{the similarity structure of the data universe}. In a video corpus, frames that are temporally or semantically close are nearly identical in content. An adversary who predicts a frame one step away from a true training frame has not recovered an exact member of the dataset, yet has localized a sensitive event in time---a meaningful privacy breach that binary scoring ignores entirely. This is not a question of how the dataset $X$ is sampled; it is a property of the universe $U$ from which $X$ is drawn. Even when frames are sampled independently, the universe has geometric structure that makes near-miss predictions informative. Modern video object detection systems explicitly exploit temporal coherence at the feature level, aggregating representations across motion trajectories to improve recognition accuracy~\cite{zhu2017flow}, and large camera deployments exhibit spatio-temporal correlations across views~\cite{jain2019scaling}. Consequently, classical notions of membership inference do not fully capture the privacy risks present in video analytics.
+
+The second dimension is \textbf{statistical dependence among sampled frames}. Consecutive video frames are highly correlated, so a dataset assembled from contiguous segments is far from i.i.d. This dependence affects both privacy (the mutual information between $X$ and $\mathcal{M}(X)$ depends on the correlation structure of $X$) and utility (classifiers that aggregate temporal information can partially average out independent noise). Accounting for dependence in the sampling process is a complementary challenge.
+
+This paper addresses the first dimension in depth and provides an initial analysis of the second. Our central contribution is a \emph{weighted membership inference} framework that captures the graded nature of privacy leakage in structured universes. We retain the i.i.d.\ sampling model of prior work~\cite{xiao2024formal} for the combinatorial prior analysis, then separately examine how temporal correlation among frame embeddings affects the mutual information bounds that govern the mechanism's privacy guarantee (Section~\ref{sec:correlation_analysis}).
+
+\paragraph{Weighted scoring: intuition.}
+In the binary (integer-weight) setting, the adversary's score is the number of exact matches between its guess $\hat{X}$ and the true dataset $X$. We generalize this to a weighted score $\sum_i w_i$, where $w_i \in [0,1]$ reflects how close the adversary's $i$-th guess is to the nearest true frame. In the simplest extension---the \emph{half-integer} model ($m{=}2$)---each guess earns weight $1$ for an exact match, weight $1/2$ for a frame within a fixed temporal window of a true frame, and weight $0$ otherwise. The general $1/m$-resolution model refines this to $m+1$ weight levels, capturing finer gradations of similarity. The choice of weights and window size is a deployment-specific parameter that encodes which near-miss predictions are privacy-relevant. In surveillance footage at 30\,fps, for example, even a $\pm 5$-frame window (${\approx}\,0.17$\,s) reveals that a person was in view at approximately that time. In autonomous driving, identifying a frame within $\pm 10$ of a pedestrian crossing event is nearly as privacy-sensitive as exact identification.
+
+Specifically, we introduce this \emph{weighted inference framework} for structured data universes. Instead of assigning a reward solely for exact correctness, we define a similarity-based reward function over frames: exact matches receive full weight, proximate frames receive partial credit, and unrelated frames receive zero reward. This induces a generalized success metric that interpolates between strict membership inference and approximate event localization. We characterize the adversary's \emph{prior success probability} under random guessing in this weighted setting using multivariate hypergeometric models, thereby quantifying the baseline difficulty of the inference task before observing $\mathcal{M}(X)$.
+
+\paragraph{Quantitative preview.}
+The weighted scoring rule alters the adversary's baseline (prior) success probability under random guessing, which in turn controls the noise required for a given privacy guarantee. On a representative universe ($N{=}1000$, $n{=}50$, $m{=}100$ partial-credit frames), the prior-cost constant $C$ (defined precisely in Section~\ref{sec:main_results}) inflates by a factor of $31$ from integer to half-integer weights, requiring a $5.6{\times}$ increase in the noise standard deviation $\sigma$ to maintain the same mutual-information-based privacy bound. The magnitude of this inflation depends on the number of partial-credit elements in the universe; the factor of $31$ is specific to this universe and may differ for a given deployment.
+
+Building on the prior work on learnable obfuscation~\cite{xiao2024formal}, we extend their analysis to weighted video inference. Adversarial success probability under graded rewards is controlled by the mutual information $I(X; \mathcal{M}(X))$, adjusted by a factor reflecting the increased prior success probability induced by partial credit. When the correctness criterion is relaxed from integer-weight (exact-match) inference to half-integer or $1/m$-resolution inference, the adversary's baseline success strictly increases. To preserve an equivalent privacy guarantee, the obfuscation mechanism must reduce mutual information proportionally. For Gaussian masking mechanisms of the form
+\[
+\mathcal{M}(X) = XW + B,
+\]
+we derive explicit calibration conditions on the noise variance required to offset the increase in prior success probability under fractional-weight inference. We further show that the mutual information bounds from data mixing and permutation studied by Xiao \textit{et al.}~\cite{xiao2024formal} for integer-weight inference carry over to the weighted setting, since the mutual information between $X$ and $\mathcal{M}(X)$ is independent of the adversary's reward structure. The difference lies in the noise calibration: the altered prior under fractional weights requires proportionally lower mutual information to maintain equivalent privacy.
+
+\paragraph{Why theoretical bounds?}
+Empirical membership inference attacks measure the success of a \emph{specific} adversarial strategy and scoring rule. Theoretical bounds, by contrast, hold against \emph{all} adversaries simultaneously and make explicit how the scoring rule itself (binary vs.\ weighted) changes the difficulty of the inference task. Our framework reveals a structural gap that no finite set of empirical attacks can establish: under weighted scoring, the adversary's prior success is strictly higher than under binary scoring, so the same mechanism provides strictly weaker privacy when leakage is measured by proximity rather than exact recovery. The theoretical analysis is complementary to empirical evaluation; we provide both.
+
+To ground the theory in practice, we instantiate the linear masking mechanism of prior work~\cite{xiao2024formal} (class-$k$ mixing, random permutation, random projection, and additive Gaussian noise) on the UCF-101 action recognition dataset~\cite{soomro2012ucf101}, in which the downstream task is multi-class video classification: given a classifier model trained on a set of obfuscated clip embeddings, the model predicts the action category. Our experiments numerically evaluate the predicted noise inflation under half-integer weighted inference, report empirical scores for the two temporal membership inference sub-attacks (which we define as informed and uninformed) at multiple representative operating points under both weighted and binary scoring, and report downstream classifier accuracy across the noise sweep.
+
+\paragraph{Contributions.}
+This work makes the following contributions:
+\begin{itemize}
+    \item We formalize \emph{weighted membership inference} for structured data universes, in which adversarial success is graded by similarity rather than exact recovery. We clearly separate this from the orthogonal question of statistical dependence in sampling, which we analyze separately.
+    \item We derive closed-form prior success probabilities under discretized similarity weights ($1/m$ resolution) and show that these strictly exceed the integer-weight baseline. On a representative universe, the prior-cost constant inflates by $31{\times}$ at half-integer resolution.
+    \item We extend the state-of-the-art mutual-information-based privacy framework~\cite{xiao2024formal} to weighted inference and derive explicit noise calibration conditions. We show that the mixing and permutation amplification bounds of the prior work~\cite{xiao2024formal} transfer directly to the weighted setting.
+    \item We analyze the effect of temporal correlation among frame embeddings, proving that correlation reduces the mutual-information bound but enables a temporal-aggregation attack that averages away independent noise, and that matching the noise correlation to the data correlation eliminates this vulnerability at no extra noise budget.
+    \item We empirically evaluate the privacy--utility tradeoff on UCF-101, reporting both weighted and binary attack scores at multiple operating points, measuring the real frame-embedding autocorrelation, and instantiating the aggregation attack and correlated-noise defense that validate the correlation analysis.
+\end{itemize}
+
+\paragraph{Reproducibility.}
+Code and scripts to reproduce all experiments and figures are available at the repository listed in Appendix~\ref{app:open_science}.
+
+%% =================================================================
+%% REVISED RELATED WORK
+%% Addresses: B7 (compare to DP for video/temporal data)
+%% =================================================================
+
+\section{Related Work}
+ Early systems such as PrivacyCam~\cite{chattopadhyay2007privacycam} demonstrated that selective encryption of regions of interest in video streams can provide invertible privacy protection at the camera level; however, these approaches did not provide formal information-theoretic guarantees relating privacy leakage to downstream learning performance. More recently, PECAM~\cite{wu2021pecam} proposes a securely reversible transformation for video streaming that preserves downstream analytics accuracy while empirically suppressing sensitive attributes, and Kang \textit{et al.}~\cite{kang2020semantic} develop learned semantic indexing mechanisms to accelerate machine learning-based queries over large unstructured datasets, including video corpora. These approaches focus on system efficiency and empirical evaluation rather than on formal information-theoretic guarantees that characterize adversarial inference success as a function of the mutual information between original and transformed video streams.
+ 
+Our work builds on learnable obfuscation, membership inference, heuristic data transformations, and formal privacy guarantees. We situate our contribution within these lines of research. 
+
+\subsection{Learnable Obfuscation and Property-Preserving Transformations}
+
+A recent line of work formalizes the notion of property-preserving data transformations under explicit learnability constraints. Xiao \textit{et al.}~\cite{xiao2024formal} initiate a formal study of \emph{learnable obfuscation}, investigating whether data encodings can preserve PAC learnability~\cite{valiant1984theory} while providing provable privacy guarantees. They show that non-trivial property-preserving transformations cannot achieve cryptographic Indistinguishability under Chosen Plaintext Attack (IND-CPA) security in the worst case, establishing a fundamental impossibility result. On the positive side, they develop information-theoretic tools under PAC Privacy~\cite{xiao2023pacprivacy} to quantify leakage for heuristic obfuscations such as matrix masking, data mixing, and permutation, and derive mutual-information-based bounds against reconstruction and membership inference attacks.
+
+Parallel to this formal line of work, heuristic property-preserving transformations have appeared in several systems, including Trans Net~\cite{he2020transnet}, NeuraCrypt~\cite{yala2021neuracrypt}, and Syfer~\cite{yala2022syfer}, which rely on random linear projections or random neural networks. Data mixing approaches such as Instahide~\cite{huang2020instahide} and its variants~\cite{borgnia2021dpinstahide,liu2020datamix} apply convex combinations of samples to obscure individual data points. Matrix masking techniques have also been studied in privacy and statistical disclosure contexts \cite{ding2020triple,zhao2018sparse}, often motivated by the Johnson--Lindenstrauss lemma \cite{larsen2017optimality} and locality-preserving embeddings \cite{indyk1997locality}.
+
+Several of these constructions have subsequently been shown to lack formal security guarantees. Specifically, Carlini \textit{et al.}~\cite{carlini2021privatelearning,carlini2021neuracrypt} demonstrate reconstruction and identification attacks against instance encoding schemes such as Instahide and NeuraCrypt, illustrating the gap between empirical obfuscation and provable privacy.
+
+Related ideas also arise in privacy-aware representation learning, where the goal is to construct feature mappings that retain task-relevant information while suppressing sensitive attributes. Adversarial representation learning frameworks~\cite{edwards2015censoring,louppe2017learning} formalize this tradeoff by training encoders to minimize predictive power about protected variables, while information bottleneck--based approaches~\cite{alemi2016deep} explicitly regularize mutual information between inputs and latent representations. Formal analyses of invariant and minimal sufficient representations~\cite{achille2018information} connect compression and invariance to generalization and privacy. Although these works are primarily motivated by fairness or robustness rather than outsourced learning, they share the central objective of constructing property-preserving transformations that discard extraneous information.
+
+Our work extends the formal prior line of work~\cite{xiao2024formal} by introducing graded similarity-based inference models for structured data universes, which require new prior success characterizations beyond binary correctness. In contrast to prior representation-learning approaches, we analyze such transformations under explicit weighted membership inference guarantees and derive prior-dependent noise calibration conditions within a formal learnable obfuscation framework.
+
+
+\subsection{PAC Privacy and Formal Learnable Obfuscation Foundations}
+
+Our analysis builds on recent information-theoretic approaches to instance-aware privacy, particularly the PAC-privacy framework and its formalization of learnable obfuscation. Xiao and Devadas introduced \emph{PAC Privacy} as a distribution-dependent privacy notion that quantifies the posterior inference advantage of an adversary observing the output of an arbitrary data-processing mechanism \cite{xiao2023pacprivacy}. Unlike differential privacy, which provides input-independent worst-case guarantees, PAC Privacy characterizes instance-level inference hardness and admits automatic Monte Carlo estimation for black-box mechanisms.
+
+Building on this framework, Xiao \textit{et al.} formalized \emph{learnable obfuscation} and established both possibility and impossibility results for property-preserving encodings \cite{xiao2024formal}. They show that non-trivial encodings supporting learning cannot, in general, achieve cryptographic indistinguishability but can provide information-theoretic protection against membership and reconstruction attacks when combined with calibrated random perturbations. These results provide the formal basis for analyzing mechanisms such as matrix masking, data mixing, and permutation under explicit inference-hardness guarantees.
+
+More broadly, PAC Privacy belongs to a line of work characterizing privacy leakage through information-theoretic dependence between inputs and released outputs. Mutual-information-based analyses show that controlling $I(X;A(X))$ limits overfitting, reconstruction risk, and inference advantage \cite{russo2016controlling,raginsky2016information,xu2017information}. Related notions such as maximal leakage and coupled-worlds privacy similarly quantify adversarial success via divergence-based dependence measures rather than worst-case indistinguishability \cite{esposito2019maximal,bassily2013coupled}.
+
+Connections between privacy guarantees and statistical learnability have also been studied in differentially private learning, where stability characterizes when learning remains feasible under privacy constraints \cite{wang2016learning}. 
+
+These results reinforce the central theme of learnable obfuscation: privacy-preserving transformations must control inference leakage while preserving task-relevant structure.
+
+Our work extends this information-theoretic framework to structured data universes with similarity-aware inference objectives. In contrast to prior analyses focusing on binary membership recovery in static i.i.d. datasets, we introduce weighted inference models that capture graded temporal and semantic alignment between frames and derive the corresponding prior-success and noise-calibration consequences within the PAC-privacy framework.
+
+\subsection{Membership Inference Attacks}
+
+Membership inference attacks were first demonstrated in practice by Shokri \textit{et al.}~\cite{shokri2017membership}. Subsequent work strengthened the theoretical understanding of reconstruction and inference hardness, including bounds on training data reconstruction~\cite{balle2022reconstructing,guo2022bounding} and analyses of membership inference advantage \cite{carlini2022firstprinciples,thudi2022bounding,hilprecht2019monte}.
+
+While most prior membership inference work evaluates adversarial success under binary criteria, i.e., whether a specific record belongs to the training set, related lines of research show that privacy leakage can occur at more granular or aggregate levels. Property inference attacks show that adversaries may recover dataset-level attributes without identifying specific instances~\cite{ganju2018property,melis2019exploiting}, and reconstruction analyses quantify partial recovery risk beyond exact membership inclusion~\cite{balle2022reconstructing,guo2022bounding}. These results indicate that inference risk is not inherently binary, motivating our graded, similarity-based formulation in which adversarial success is weighted according to partial alignment rather than exact recovery.
+
+Beyond instance-level attacks, recent work has explored more powerful and adaptive membership inference strategies, including label-only attacks that operate without confidence scores~\cite{choquette2021label}, and auditing-style attacks that assess whether entire datasets or distributions were used during training~\cite{sablayrolles2019white}. Other analyses characterize membership inference through hypothesis testing and likelihood-ratio formulations, providing a statistical perspective on adversarial advantage~\cite{yeom2018privacy}. These developments further indicate that inference risk extends beyond simple binary inclusion tests and can manifest through distributional, aggregate, or confidence-based signals, complementing the graded formulation adopted in our setting.
+
+\subsection{Differential Privacy}
+
+Differential privacy (DP) provides worst-case indistinguishability guarantees~\cite{dwork2008differential,duchi2013local,bun2016cdp}, and has been extended to subsampling amplification~\cite{balle2018subsampling}. DP-based analysis has also been used to derive bounds on membership inference hardness~\cite{thudi2022bounding} and reconstruction risk~\cite{balle2022reconstructing}.
+
+While DP provides worst-case indistinguishability guarantees that hold uniformly over all neighboring datasets~\cite{dwork2008differential,duchi2013local,bun2016cdp}, its input-independent nature can make tight, data-dependent analysis of complex transformations difficult. Information-theoretic leakage measures such as mutual information have been used to quantify inference advantage in a distribution-aware manner~\cite{russo2016controlling,raginsky2016information,xiao2023pacprivacy}. Our framework adopts this instance-aware perspective, allowing us to directly characterize how relaxing the correctness criterion increases the adversarial prior success probability.
+
+%% =================================================================
+%% NEW SUBSECTION: DP for temporally correlated data
+%% Addresses: B7
+%% =================================================================
+
+\subsection{Differential Privacy for Temporally Correlated Data}
+
+Standard differential privacy assumes that dataset entries are independent, and its guarantees can degrade when applied to correlated data. Cao et al.~\cite{cao2017quantifying} model temporal correlations as a Markov chain and show that event-level privacy loss under a standard DP mechanism can accumulate over time, a phenomenon they call \emph{temporal privacy leakage}. Kifer and Machanavajjhala~\cite{kifer2014pufferfish} introduce the \emph{Pufferfish} framework, which generalizes DP by specifying explicit sets of secrets and data-generating distributions, allowing privacy guarantees that account for known correlations. Song et al.~\cite{song2017pufferfish} provide the first general-purpose mechanism (the Wasserstein mechanism) for Pufferfish privacy and demonstrate it on temporally correlated physical-activity measurements. Bozkir et al.~\cite{bozkir2021differential} apply DP to eye-tracking data with temporal correlations, a setting closely analogous to video frames.
+
+These approaches modify the privacy \emph{definition} or \emph{mechanism} to account for dependence in the data-generating process. Our work differs in two respects. First, we operate within the mutual-information framework of learnable obfuscation~\cite{xiao2024formal} rather than the $(\varepsilon,\delta)$ indistinguishability paradigm. Second, while the Pufferfish line models correlation through the data distribution, our weighted inference framework models the \emph{adversary's scoring rule}: the data may be sampled independently, but the universe has similarity structure that makes near-miss predictions privacy-relevant. The two perspectives are complementary: Pufferfish-style analysis quantifies how correlation changes the mechanism's privacy guarantee, while weighted inference quantifies how the evaluation metric itself changes the baseline difficulty of the inference task. In Section~\ref{sec:correlation_analysis}, we additionally analyze how temporal correlation affects the mutual information bounds within our framework, connecting to the concerns raised by the Pufferfish literature.
+
+\subsection{Cryptographic and Secure Computation Approaches}
+
+Cryptographic solutions such as Fully Homomorphic Encryption (FHE) provide computational security for outsourced learning \cite{gentry2009fhe,gorantala2023fhe}, but incur significant computational overhead. Other approaches include searchable encryption \cite{kamara2013parallel,stefanov2013dynamic} and order-preserving or order-revealing encryption \cite{agrawal2004order,popa2013ideal,lewi2016order}, which enable limited functionality but do not preserve statistical learnability.
+
+Prior work~\cite{xiao2024formal} show that non-trivial learnable obfuscation cannot achieve cryptographic indistinguishability in general. Our work operates within this information-theoretic regime, focusing on quantifying leakage rather than achieving computational secrecy.
+
+\paragraph{Summary.}
+Prior work studies heuristic property-preserving transformations, membership inference and reconstruction attacks, differential privacy (including extensions for correlated data), and cryptographic approaches to outsourced learning. We extend the formal learnable obfuscation framework to structured data universes, introducing graded similarity-based inference and deriving weight-dependent noise calibration rules, and provide an initial analysis of how temporal correlation among frames affects the mutual information privacy bounds.
+
+%% =================================================================
+%% REVISED PRELIMINARY SECTION
+%% Addresses: B1 (self-contained, don't assume [50]), B2 (why uniform),
+%%   B3 (how weights are decided), B5 (role of sigma)
+%% =================================================================
+
+\section{Preliminary}
+\label{sec:preliminary}
+
+We build on the learnable obfuscation framework of Xiao et al.~\cite{xiao2024formal}, which we summarize here for self-containment before introducing our weighted generalization.
+
+\subsection{Binary Membership Inference (Prior Work)}
+
+In the standard membership inference problem~\cite{shokri2017membership,xiao2024formal}, a dataset $X = \{x_1, \ldots, x_n\}$ is sampled uniformly at random from a finite universe $U = \{u_1, \ldots, u_N\}$. A mechanism $\mathcal{M}$ produces a (possibly randomized) encoding $\mathcal{M}(X)$, and an adversary observes $\mathcal{M}(X)$ and attempts to recover $X$. The adversary outputs an $n$-subset $\hat{X} \subseteq U$ as its estimate of the true membership set. In the binary setting, the adversary's score is the number of correctly identified elements:
+\begin{equation}\label{eq:binary_score}
+\text{Score}_{\text{binary}}(\hat{X}, X)
+= |\hat{X} \cap X|
+= \sum_{i=1}^n \mathbf{1}\{x_i \in \hat{X}\}.
+\end{equation}
+
+Xiao et al.~\cite{xiao2024formal} define a mechanism $\mathcal{M}$ to be resistant to $(1{-}\bar\delta)$-average membership inference if, for every adversary, $\mathbb{E}_X[|\hat{X} \cap X|] \le n(1{-}\bar\delta)$, and show that $\bar\delta$ is controlled by the mutual information $\mathrm{MI}(X; \mathcal{M}(X))$ via an $f$-divergence bound. Specifically, when $X$ consists of $n$ randomly generated datapoints and the sampling rate is $q = n/N$, the prior (random-guess) success probability for identifying at least $j$ memberships is given by a stratified hypergeometric distribution, and the posterior success is bounded by the mutual information between $X$ and $\mathcal{M}(X)$.
+
+\paragraph{Role of uniform sampling.}
+The assumption that $X$ is drawn uniformly at random from $U$ is inherited from~\cite{xiao2024formal} and serves two purposes. First, it yields closed-form prior success probabilities via the hypergeometric distribution, enabling explicit calibration of the noise required for a target privacy level. Second, it models a conservative (maximum-entropy) prior on the data owner's sampling strategy: any structure in how the data owner assembles $X$ can only help the adversary, so the uniform-sampling analysis provides a \emph{lower bound} on adversarial success. For real-world datasets assembled with non-uniform sampling (e.g., contiguous video segments), the prior success probabilities will generally be higher, and our analysis remains valid as a baseline. We analyze the effect of non-uniform (correlated) sampling on the mutual information bounds in Section~\ref{sec:correlation_analysis}.
+
+\subsection{Weighted Membership Inference (This Work)}
+
+In video data, the universe $U$ exhibits strong similarity structure: frames that are temporally close depict nearly identical content. An adversary who predicts a frame one index away from a true training frame has not achieved an exact match, yet has localized a sensitive event in time. To capture this, we replace the binary score $\mathbf{1}\{x_i \in \hat{X}\}$ with a weighted score $w_i \in [0,1]$ that reflects the similarity between the adversary's guess and the nearest true frame.
+
+\paragraph{Weight selection.}
+\label{par:weight_selection}
+The weight function $w : U \times U \to [0,1]$ encodes the data owner's (or analyst's) judgment about which near-miss predictions are privacy-relevant. We consider two natural families:
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Temporal-window weights.}  Fix a window half-width $\Delta$. For a frame at index $t$ and a true frame at index $t^*$ in the same clip, $w = 1$ if $t = t^*$, $w = 1/2$ if $0 < |t - t^*| \le \Delta$, $w = 0$ otherwise. This is the half-integer model ($m{=}2$). For finer gradation, one can use $w = 1 - |t - t^*|/(m\Delta)$, yielding $1/m$-resolution weights.
+\item \textbf{Embedding-similarity weights.} Given a feature extractor $\phi$, set $w = \max(0, \cos(\phi(u), \phi(u^*)))$ or a discretized version thereof. This captures semantic rather than purely temporal similarity.
+\end{enumerate}
+In our experiments, we use temporal-window weights with $\Delta = 2$, which is suitable for the 30\,fps clips in UCF-101 and corresponds to a temporal tolerance of ${\approx}\,67$\,ms.
+
+\begin{definition}[Weighted Membership Inference Challenge]\label{memebership inference challenge}
+Let $U = \{u_1, u_2, \dots, u_N\}$ be a finite pool of video frames and let $\mathcal{M}$ be a (possibly randomized) processing mechanism. A dataset $X \subseteq U$ of size $n$ is drawn uniformly at random from $U$, and the adversary observes the released output $\mathcal{M}(X)$. Based on this observation, the adversary outputs an $n$-subset $\hat{X} \subseteq U$ as its estimate of the true membership set $X$.
+
+We say that $\mathcal{M}$ satisfies a $(1-\bar{\delta})$ average weighted membership inference challenge if, for every adversary,
+\begin{equation}\label{eq:inference}
+    \mathbb{E}_{X}\!\left[\sum_{i=1}^n w_i \right]
+    \;\le\; n(1-\bar{\delta}),
+\end{equation}
+where $w_i \in [0,1]$ denotes the weight assigned to the $i$th selected frame in $\hat{X}$ with respect to the true subset $X$, as determined by the weight function defined above. The expectation is taken over the random draw of $X$ (and any randomness in $\mathcal{M}$). Thus, on average, no adversary can accumulate more than $n(1-\bar{\delta})$ total weight from correctly (or approximately correctly) identifying elements of $X$.
+\end{definition}
+
+The average guarantee above controls the adversary's aggregate success across the entire dataset. Such aggregate control is determined by the adversary's performance on individual elements. The individual guarantee, following Definition~7 of~\cite{xiao2024formal}, formalizes a stronger, element-level notion of protection. If a uniform bound $\delta_i \ge \delta$ holds for all $u_i \in U$, then the average parameter satisfies $\bar{\delta} \ge \delta$. Conversely, an average guarantee alone does not preclude the possibility that certain elements are more vulnerable than others. We therefore distinguish between aggregate protection and element-level robustness.
+
+\paragraph{Individual guarantee.}
+For a fixed element $u_i \in U$, we say that $\mathcal{M}$ is resistant to $(1-\delta_i)$ individual weighted membership inference for $u_i$ if, for every adversary,
+\[
+\Pr\!\left(
+    \mathbf{1}_{\{u_i \in X\}}
+    =
+    \mathbf{1}_{\{u_i \in \hat{X}\}}
+\right)
+\;\le\;
+1 - \delta_i,
+\]
+where $\mathbf{1}_{\{u_i \in X\}}$ and $\mathbf{1}_{\{u_i \in \hat{X}\}}$ are indicator variables denoting whether $u_i$ belongs to the true set $X$ and the adversary's estimate $\hat{X}$, respectively.
+
+\paragraph{Downstream task.}
+Throughout this paper, the downstream task is \emph{multi-class classification}: given obfuscated data $\mathcal{M}(X)$, a classifier is trained to predict the class label (e.g., action category in video, or object class in images) associated with each sample. The obfuscation mechanism must preserve sufficient structure for the classifier to achieve non-trivial accuracy on the transformed domain, while limiting the adversary's ability to recover membership information from $\mathcal{M}(X)$. In our experiments, the classifier operates on obfuscated clip-level video embeddings and predicts one of $c$ action categories.
+
+\paragraph{Weighted versus binary inference.}
+In the classical (binary) membership inference setting, the weights satisfy $w_i \in \{0,1\}$, so the left-hand side of~\eqref{eq:inference} simply counts the number of correctly identified elements. In our setting, we allow fractional weights $w_i \in [0,1]$ to reflect the similarity structure of the universe. If a frame returned by the adversary is close to a true frame in $X$, it receives partial credit rather than being counted as entirely incorrect. Consequently, the quantity on the left-hand side of~\eqref{eq:inference} can only increase relative to the binary case, and satisfying the same upper bound $n(1-\bar{\delta})$ is strictly more demanding in the weighted setting, since the adversary can accumulate success even from near-miss predictions. This captures the additional difficulty of ensuring privacy when the universe exhibits strong similarity structure.
+
+\subsection{Threat Model and Obfuscation Mechanism}
+
+We instantiate the learnable obfuscation framework~\cite{xiao2024formal} in an outsourced \emph{training} setting, adopting the construction in Algorithm~1 of~\cite{xiao2024formal}. The data owner holds raw video clips $X$ and their ground-truth class labels $Y$ locally, and applies a paired feature/label encoding to its training set:
+\[
+T_X(X) = \Pi_1 M_{\mathrm{mix}} X W + B,
+\qquad
+T_Y(Y) = \Pi_1 M_{\mathrm{mix}} Y \Pi_2,
+\]
+where $M_{\mathrm{mix}}$ is a class-$k$ mixing matrix that averages $k$ samples from each ordered pair of action classes, $\Pi_1$ is a uniformly random row permutation, $W \in \mathbb{R}^{d_0 \times d}$ is a random Gaussian projection, $B$ is i.i.d.\ Gaussian noise of variance $\sigma^2$, and $\Pi_2$ is a fixed label-class permutation. The same $\Pi_1$ and $M_{\mathrm{mix}}$ are applied to features and labels so that mixed feature rows remain aligned with their soft-label targets. We write $\mathcal{M}(X) := T_X(X)$ for the released obfuscated features when the label encoding is not relevant. The data owner ships only the obfuscated training pair $(T_X(X_{\mathrm{train}}), T_Y(Y_{\mathrm{train}}))$ to an external training service.
+
+\paragraph{Role of the noise parameter $\sigma$.}
+The parameter $\sigma$ is the mechanism's primary privacy knob: increasing $\sigma$ reduces the mutual information $\mathrm{MI}(X; \mathcal{M}(X))$ (and hence limits adversarial inference) but also degrades the signal available to the downstream classifier. At $\sigma = 0$ the mechanism provides no noise-based privacy; as $\sigma \to \infty$ the output approaches pure noise and both attack success and classifier accuracy degrade to chance level. The useful operating range is the interval of $\sigma$ values in which downstream accuracy remains acceptable while adversarial success is meaningfully reduced.
+
+The external trainer is honest-but-curious: it executes the agreed-upon learning procedure on the obfuscated data but may also attempt to recover information about the underlying clips and frames. Inference on a fresh clip is performed locally by the data owner, or, equivalently, the trainer returns the trained model and inference is run wherever convenient. At inference time we apply only the ResNet-18 frame encoder and the trained classifier; no $M_{\mathrm{mix}}$, no $B$, and no $\Pi_1$ are applied to fresh inputs, and the only obfuscation artifact retained is the fixed label permutation $\Pi_2$, inverted via $\Pi_2^{-1}$ on the logits before the final argmax. This asymmetry resolves a potential circularity: class-conditional mixing requires labels, but labels are only available at training time when they are owned by the data holder, not at inference time when they are the prediction target. As detailed in Section~\ref{subsec:exp_setup}, the downstream classifier in our experiments operates on cached ResNet-18 embeddings and absorbs the projection $W$ into the frame encoder, so the mechanism it sees is $\Pi_1 M_{\mathrm{mix}} X + B$; the weighted membership inference attack uses the explicit form $\Pi_1 M_{\mathrm{mix}} X W + B$ on flattened pixels.
+
+%% =================================================================
+%% NEW: Algorithm Boxes
+%% Addresses: B4 (clearly demarcated algorithm boxes)
+%% =================================================================
+
+Algorithm~\ref{alg:mechanism} summarizes the full obfuscation pipeline, and Algorithm~\ref{alg:attack} describes the adversary's inference procedure.
+
+\begin{algorithm}[t]
+\caption{Obfuscation Mechanism (Data Owner)}
+\label{alg:mechanism}
+\begin{algorithmic}[1]
+\REQUIRE Training features $X \in \mathbb{R}^{n \times d_0}$ (frame embeddings), labels $Y$; parameters: mixing intensity $k \ge 0$, noise std.\ dev.\ $\sigma \ge 0$, projection dim.\ $d$, number of classes $c$
+\ENSURE Obfuscated features $T_X(X)$, obfuscated labels $T_Y(Y)$
+\STATE \textbf{// Step 1: Class-$k$ mixing}
+\IF{$k = 0$}
+  \STATE $\tilde{X} \leftarrow X$, $\tilde{Y} \leftarrow Y$
+\ELSE
+  \FOR{each ordered class pair $(i,j) \in [c] \times [c]$}
+    \STATE Sample $k$ rows from class $i$, $k$ from class $j$; average frame-by-frame
+    \STATE Soft label: one-hot on $i$ if $i{=}j$; mass $1/2$ on each otherwise
+  \ENDFOR
+  \STATE Stack all $c^2$ mixed rows into $\tilde{X}$, $\tilde{Y}$
+\ENDIF
+\STATE \textbf{// Step 2: Row permutation}
+\STATE $\Pi_1 \leftarrow$ uniform random permutation of rows
+\STATE \textbf{// Step 3: Random projection}
+\STATE Draw $W \in \mathbb{R}^{d_0 \times d}$, $W_{ij} \sim \mathcal{N}(0, 1/d)$
+\STATE \textbf{// Step 4: Additive noise}
+\STATE Draw $B \in \mathbb{R}^{|\tilde{X}| \times d}$, $B_{ij} \sim \mathcal{N}(0, \sigma^2)$
+\STATE \textbf{// Step 5: Label permutation}
+\STATE Draw fixed label permutation $\Pi_2$ on $[c]$
+\STATE $T_X(X) \leftarrow \Pi_1 \tilde{X} W + B$
+\STATE $T_Y(Y) \leftarrow \Pi_1 \tilde{Y} \Pi_2$
+\RETURN $(T_X(X),\; T_Y(Y))$
+\end{algorithmic}
+\end{algorithm}
+
+
+\begin{algorithm}[t]
+\caption{Weighted Membership Inference Attack (Adversary)}
+\label{alg:attack}
+\begin{algorithmic}[1]
+\REQUIRE Observed release $o = T_X(X)$, candidate pool $U'$, mechanism parameters $(\sigma, k, W, \Pi_1, M_{\mathrm{mix}})$; number of guesses $T$, temporal window half-width $\Delta$
+\ENSURE Top-$T$ candidates with weighted score
+\STATE \textbf{// Step 1: Counterfactual construction}
+\STATE Construct same-class counterfactual dataset $X_{\mathrm{cf}}$ excluding target
+\STATE $o_{\mathrm{cf}} \leftarrow \mathcal{M}(X_{\mathrm{cf}})$
+\STATE $r \leftarrow o - o_{\mathrm{cf}}$ \COMMENT{residual}
+\STATE \textbf{// Step 2: Likelihood-ratio scoring}
+\FOR{each candidate $c \in U'$}
+  \STATE Compute predicted difference $\Delta_c$ between member/non-member hypotheses
+  \STATE $\mathrm{LR}(c) \leftarrow \frac{r \cdot \Delta_c}{\sigma^2} - \frac{\|\Delta_c\|^2}{2\sigma^2}$
+\ENDFOR
+\STATE \textbf{// Step 3: Rank and emit top-$T$}
+\STATE $\hat{X} \leftarrow$ top-$T$ candidates by $\mathrm{LR}(c)$
+\STATE \textbf{// Step 4: Weighted scoring}
+\FOR{each guess $\hat{x}_i \in \hat{X}$}
+  \IF{exact match with a true frame}
+    \STATE $w_i \leftarrow 1$
+  \ELSIF{same clip, $|\mathrm{idx}(\hat{x}_i) - \mathrm{idx}(x^*)| \le \Delta$}
+    \STATE $w_i \leftarrow 1/2$
+  \ELSE
+    \STATE $w_i \leftarrow 0$
+  \ENDIF
+\ENDFOR
+\RETURN $\hat{X}$, $\mathrm{Score} = \frac{1}{T}\sum_{i=1}^T w_i$
+\end{algorithmic}
+\end{algorithm}
+
+
+\paragraph{Adversary.}
+The weighted membership inference adversary in our threat model is the external trainer. Given the obfuscated training release $(T_X(X_{\mathrm{train}}), T_Y(Y_{\mathrm{train}}))$ and a candidate pool $U$ drawn from the same distribution as the source clips, the adversary attempts to identify which clips or frames from $U$ contributed to $X_{\mathrm{train}}$. Definition~\ref{memebership inference challenge} bounds this success under graded scoring rules that credit near-miss recoveries. We instantiate two concrete adversaries---\emph{index inference} (Attack~1, informed) and \emph{frame-level membership inference} (Attack~2, uninformed)---that vary the side information available to the attacker (clip identity, class identity, or none) and operate exclusively on the obfuscated release and the candidate pool, with no auxiliary access to the trained model's parameters. We use the state-of-the-art likelihood-ratio scoring method~\cite{carlini2022firstprinciples}, as defined in Algorithm~\ref{alg:attack}, for evaluation.
+\section{Main Results}
+\label{sec:main_results}
+We now provide explicit bounds on the Temporal Membership Inference Challenge in Definition~\ref{memebership inference challenge} in terms of the mutual information between the original dataset and the released (or mixed) data. Mutual information is a quantitative measure of statistical dependence between two random variables. In our setting, it captures how much information about the sensitive dataset $X$ is revealed by the mechanism's output $\mathcal{M}(X)$. A smaller mutual information implies that $\mathcal{M}(X)$ leaks less information about $X$, and bounds the power of any inference adversary.
+
+To formalize this connection, we follow the general framework that relates posterior inference advantage to an $f$-divergence. Let $\Delta_f^\delta$ denote the posterior advantage defined via a divergence $\mathcal{D}_f$. Then one can bound
+\begin{equation}\label{eq:general_f_bound}
+\Delta_f^\delta 
+= 
+\mathcal{D}_f\!\left( 
+    \mathbf{1}_\delta \,\middle\|\, \mathbf{1}_{\delta_0^\rho}
+\right)
+\;\le\;
+\inf_{P_W} 
+\mathcal{D}_f\!\left(
+    P_{X,\mathcal{F}(X)} 
+    \,\middle\|\,
+    P_X \otimes P_W
+\right),
+\end{equation}
+where $P_{X,\mathcal{F}(X)}$ is the joint distribution of $(X,\mathcal{F}(X))$, $P_X$ is the marginal distribution of $X$, and $P_W$ is an arbitrary distribution on the output space. This inequality shows that the adversary's inference advantage is controlled by how far the joint distribution is from a product distribution, i.e., from statistical independence.
+
+A useful specialization is obtained by choosing $\mathcal{D}_f$ to be the Kullback--Leibler (KL) divergence and $P_W = P_{\mathcal{F}(X)}$. In this case, the right-hand side reduces to the mutual information between $X$ and $\mathcal{F}(X)$, yielding
+\begin{equation}\label{eq:mi_bound}
+\Delta_{\mathrm{KL}}^\delta
+=
+\mathcal{D}_{\mathrm{KL}}\!\left(
+    \mathbf{1}_\delta 
+    \,\middle\|\,
+    \mathbf{1}_{\delta_0^\rho}
+\right)
+\;\le\;
+\mathrm{MI}\!\left(X;\mathcal{F}(X)\right).
+\end{equation}
+Here, $\mathrm{MI}(X;\mathcal{F}(X))$ denotes the mutual information, and
+\[
+\mathcal{D}_{\mathrm{KL}}\!\left(
+    \mathbf{1}_\delta 
+    \,\middle\|\,
+    \mathbf{1}_{\delta_0^\rho}
+\right)
+=
+\delta \log\!\left(\frac{\delta}{\delta_0^\rho}\right)
++
+(1-\delta)\log\!\left(
+    \frac{1-\delta}{1-\delta_0^\rho}
+\right),
+\]
+with $\log$ denoting the natural logarithm. Equation~\eqref{eq:mi_bound} provides a direct link between inference hardness and mutual information: any mechanism with small $\mathrm{MI}(X;\mathcal{F}(X))$ bounds the achievable posterior advantage of an adversary.
+
+Mutual information admits explicit upper bounds under differential privacy guarantees. If $\mathcal{F}$ satisfies $\varepsilon$-differential privacy and $X$ consists of $n$ datapoints, then
+\begin{equation}\label{eq:dp_mi_bound}
+\mathrm{MI}\!\left(X;\mathcal{F}(X)\right)
+\;\le\;
+\frac{1}{2}\varepsilon^2 n^2.
+\end{equation}
+Combining \eqref{eq:mi_bound} and \eqref{eq:dp_mi_bound} yields explicit upper bounds on the adversary's success in the Temporal Membership Inference Challenge in terms of the privacy parameter $\varepsilon$. Mutual information thus connects statistical dependence, differential privacy guarantees, and quantitative limits on temporal membership inference performance.
+
+\begin{lemma}[Temporal Membership Inference Hardness]\label{lem:membership-hardness}
+For an arbitrary processing mechanism $\mathcal{M}$ and a normalized $n$-random-subset $X$ from the $N$-universe $U$, the adversary's posterior success rate to identify the participation of some $u_i \in U$ is upper bounded by $(1-\delta_i)$, where for sampling rate $q = n/N$ and
+\[
+1 - \delta_0 = \max\{q, 1-q\},
+\]
+\begin{equation}\label{eq:individual_mi_bound}
+(1-\delta_i)\log\!\left(\frac{1-\delta_i}{1-\delta_0}\right)
++ \delta_i \log\!\left(\frac{\delta_i}{\delta_0}\right)
+\le \mathrm{MI}(1_{u_i}, \mathcal{M}(X))
+\end{equation}
+
+Moreover, the average failure rate $\bar{\delta}$ in Definition~1 satisfies
+\begin{equation}
+1 - \bar{\delta}
+\le
+\sum_{j=1}^{n}
+\frac{\mathrm{MI}(X;\mathcal{M}(X)) + \log 2}
+{
+-\log(1-\delta_0^{\ge j})
+}.
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+
+Equation \eqref{eq:individual_mi_bound} immediately follows from \eqref{eq:mi_bound}, given that under random guessing on $X$, the probability of positively identifying the participation of an individual is $q = n/N$. Let $\delta_{\ge j}$ represent the posterior chance that the adversary correctly identifies at least $j$ memberships of selected $X$, and let $\delta_{0}^{\ge j}$ be the optimal \emph{a priori} success rate before observing $\mathcal{M}(X)$. Under the normalized sampling strategy, where we randomly select $n_0$ samples from each class,
+\[
+1 - \delta_{0}^{\ge j}
+=
+\sum_{l=j}^{n}\;
+\sum_{\substack{\{p_{1:c}\}:\\ \sum_z p_z = l}}
+\prod_{z=1}^c
+\frac{\binom{n_0}{p_z}
+\binom{N_0 - n_0}{n_0 - p_z}}
+{\binom{N_0}{n_0}}.
+\]
+
+
+By \eqref{eq:general_f_bound},
+\begin{align*}
+&D_{\mathrm{KL}}\!\left(1_{\delta_{\ge j}} \,\middle\|\, 1_{\delta_0^{\ge j}}\right)
+\\
+&\quad=
+\delta_{\ge j} \log\!\frac{\delta_{\ge j}}{\delta_0^{\ge j}}
++
+(1-\delta_{\ge j}) \log\!\frac{1-\delta_{\ge j}}{1-\delta_0^{\ge j}}
+\\
+&\quad\ge
+-(1{-}\delta_{\ge j}) \log(1{-}\delta_0^{\ge j})
+- \log 2
+- \delta_{\ge j} \log(\delta_0^{\ge j}),
+\end{align*}
+where we use the fact that
+\[
+-\delta_{\ge j} \log(\delta_{\ge j})
+- (1-\delta_{\ge j}) \log(1-\delta_{\ge j})
+\le \log(2).
+\]
+
+Therefore, given $\delta_{\ge j} \log(\delta_0^{\ge j}) \le 0$, combining with~\eqref{eq:general_f_bound}, we obtain
+\begin{equation}\label{eq:aggregate_mi_bound}
+1 - \delta_{\ge j}
+\le
+\frac{\mathrm{MI}(X;\mathcal{M}(X)) + \log(2)}
+{-\log(1-\delta_0^{\ge j})}.
+\end{equation}
+
+By Fubini's theorem on expectation, the expected number of memberships that an adversary recovers in $X$ equals
+\[
+\sum_{j=1}^{n} (1 - \delta_{\ge j}),
+\]
+which is upper bounded by \eqref{eq:aggregate_mi_bound}. Substituting the expression for $\delta_0^{\ge j}$ yields the claim.
+
+\end{proof}
+
+
+For integer-valued weights, prior work~\cite{xiao2024formal} shows
+\begin{equation}
+    1 - \delta_{0}^{\ge j}
+=
+\sum_{l=j}^{n}\;
+\sum_{\substack{\{p_{1:c}\}:\\ \sum_z p_z = l}}
+\prod_{z=1}^c
+\frac{\binom{n_0}{p_z}
+\binom{N_0 - n_0}{n_0 - p_z}}
+{\binom{N_0}{n_0}}.
+\end{equation}
+Here $\{p_{1:c}\}_l$ denotes all sets of non-negative integers $\{p_1, p_2, \ldots, p_c\}$ such that
+\[
+\sum_{z=1}^c p_z = l.
+\]
+This characterization relies on integer-valued weights and exact membership counts. When fractional weights are introduced, the combinatorial structure of the prior changes, and the corresponding success probability must be reformulated to account for weighted overlap rather than exact intersection size. The following sections analyze specific fractional-weight discretization schemes and derive analogous expressions for the prior success probability in each case.
+
+
+\subsection{Half-Integer Weights}
+
+We begin with the simplest nontrivial fractional-weight setting, in which similarity is discretized at resolution $\tfrac12$. This case is the simplest extension of the binary formulation, allowing partial credit for near-miss predictions while preserving tractable combinatorics.
+
+When the fractional weights are restricted to $\tfrac12$, the weights satisfy
+\[
+w_i \in \left\{0, \tfrac12, 1 \right\},
+\]
+so that exact members of $X$ receive full weight $1$, elements that are close to $X$ (for example, temporally adjacent or semantically similar frames) receive partial weight $\tfrac12$, and unrelated elements receive weight $0$. Under this model, the adversary's weighted overlap captures both exact membership and coarse similarity.
+
+Under this half-integer weighting scheme, the adversary's prior success probability is determined by the distribution of the weighted overlap between $X$ and a uniformly random guess $\widehat{X}$. As in the integer-weight case, this distribution admits an explicit combinatorial characterization. The following lemma derives the closed-form expression for the prior success probability under half-integer weights.
+
+\begin{lemma}[Prior success probability under fuzzy intersection]
+Let $U$ be a universe of size $N$ and let $X \subseteq U$ with $|X| = n$.  
+Suppose elements of $U$ are assigned weights in $\{0,\tfrac12,1\}$ relative to $X$, 
+with $n$ elements having weight $1$, $m$ elements having weight $\tfrac12$, 
+and the remaining $N-n-m$ elements having weight $0$.
+
+Let $\widehat{X}$ be drawn uniformly at random from all $n$-subsets of $U$, and define the weighted overlap
+\[
+W(X,\widehat{X}).
+\]
+Then for any threshold $j \in \tfrac12\mathbb{Z}$, the prior probability that the weighted overlap exceeds $j$ is
+\begin{equation}
+\label{eq:fuzzy_prior_probability}
+1 - \delta_0^{\ge j}
+=
+\sum_{a=0}^{n}
+\sum_{b=0}^{n-a}
+\mathbf{1}\!\left[a + \tfrac12 b \ge j \right]
+\cdot
+\frac{
+\binom{n}{a}
+\binom{m}{b}
+\binom{N-n-m}{\,n-a-b\,}
+}{
+\binom{N}{n}
+}.
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Partition the universe $U$ into three disjoint subsets:
+\[
+A := X, 
+\qquad 
+B := P(X), 
+\qquad 
+C := U \setminus (A \cup B),
+\]
+where $|A|=n$, $|B|=m$, and $|C|=N-n-m$.  
+Elements of $A$ have weight $1$, elements of $B$ have weight $\tfrac12$, and elements of $C$ have weight $0$.
+
+For a uniformly random $n$-subset $\widehat{X}$, define
+\[
+a := |\widehat{X}\cap A|,
+\qquad
+b := |\widehat{X}\cap B|.
+\]
+Then $n-a-b = |\widehat{X}\cap C|$, and the weighted overlap satisfies
+\[
+W(X,\widehat{X}) = a + \tfrac12 b.
+\]
+
+Because $\widehat{X}$ is sampled uniformly from all $n$-subsets of $U$, the vector
+\[
+(a,b,n-a-b)
+\]
+follows a multivariate hypergeometric distribution with population sizes $(n,m,N-n-m)$ and sample size $n$. Hence
+\[
+\Pr[a,b]
+=
+\frac{
+\binom{n}{a}
+\binom{m}{b}
+\binom{N-n-m}{\,n-a-b\,}
+}{
+\binom{N}{n}
+}.
+\]
+
+The event $\{W(X,\widehat{X}) \ge j\}$ is equivalent to $\{a + \tfrac12 b \ge j\}$. Summing the above probability over all $(a,b)$ satisfying this condition yields \eqref{eq:fuzzy_prior_probability}.\end{proof}
+
+
+\noindent
+\emph{Remark.} When $m=0$, the fractional-weight class $B$ is empty and $W(X,\widehat{X})=|\widehat{X}\cap X|$. The double sum collapses to the standard hypergeometric expression for the integer-weight prior, so Lemma~3 recovers the classical setting as a special case.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.8\linewidth]{fig1_prior_success.pdf}
+\caption{Prior success probability $1-\delta_0^{\ge j}$ under integer and half-integer weights.}
+\label{fig:prior_success}
+\end{figure}
+
+Figure~\ref{fig:prior_success} numerically illustrates the gap between integer and half-integer priors implied by Lemma~3, computed for $N=1000$, $n=50$, $m=100$, and sampling rate $q = n/N = 0.05$. At every threshold $j$, the half-integer curve dominates the integer curve, confirming that for any fixed mechanism, weighted inference is harder to defend against than exact membership recovery.
+
+This characterization shows how fractional weights alter the combinatorial structure of the prior relative to the integer-weight case. The following subsection extends this analysis to a more general $\tfrac1m$ resolution discretization, deriving the corresponding prior success probabilities under arbitrary fractional weight increments.
+
+\subsection{$\tfrac{1}{m}$ Resolution Weights}
+
+We now generalize the preceding analysis to a broader class of fractional-weight models in which similarity scores are discretized in increments of $1/m$. Each element of $U$ is assigned a weight in
+\[
+\left\{0, \tfrac{1}{m}, \tfrac{2}{m}, \dots, 1 \right\},
+\]
+with exact membership corresponding to weight $1$ and fractional weights encoding graded similarity relative to $X$.
+
+This framework extends the half-integer case and yields a nested family of inference models parameterized by $m$. For each fixed $m$, the adversary's success is determined by the distribution of a discretized weighted overlap between $X$ and a uniformly random $n$-subset $\widehat{X}$. The underlying sampling mechanism remains combinatorial: the count vector of selected elements across weight classes follows a multivariate hypergeometric distribution. Consequently, the prior success probability admits a closed-form characterization analogous to the integer and half-integer cases.
+
+The following lemma derives the corresponding expression under arbitrary $1/m$ discretization.
+
+
+\begin{lemma}[Prior success probability under discretized fuzzy intersection]
+Let $U$ be a universe of size $N$ and let $X \subseteq U$ with $|X| = n$.  
+Suppose each element $u \in U$ is assigned a weight 
+\[
+w(u;X) \in \left\{0,\tfrac1m,\tfrac2m,\dots,1\right\},
+\]
+with exact membership corresponding to weight $1$.  
+Let $M_r$ denote the number of elements in $U$ with weight $r/m$, so that 
+$\sum_{r=0}^m M_r = N$ and $M_m = n$.
+
+Let $\widehat{X}$ be drawn uniformly at random from all $n$-subsets of $U$, and define the weighted overlap
+\[
+W(X,\widehat{X}) = \sum_{u\in\widehat{X}} w(u;X).
+\]
+Then for any threshold $j \in \{0,\tfrac1m,\dots,1\}$,
+\begin{equation}
+\label{eq:discrete_fuzzy_prior}
+1-\delta_0^{\ge j}
+=
+\sum_{\substack{k_0,\dots,k_m \ge 0\\ \sum_{r=0}^m k_r = n}}
+\mathbf{1}\!\left[\sum_{r=0}^m \frac{r}{m}k_r \ge j\right]
+\cdot
+\frac{\prod_{r=0}^m \binom{M_r}{k_r}}{\binom{N}{n}}.
+\end{equation}
+Equivalently, writing $J := mj$, the indicator condition can be expressed as
+\[
+\mathbf{1}\!\left[\sum_{r=0}^m r\,k_r \ge J\right].
+\]
+\end{lemma}
+
+\begin{proof}
+Partition $U$ into weight classes
+\[
+A_r := \{u \in U : w(u;X) = r/m\}, 
+\qquad |A_r| = M_r,
+\]
+for $r=0,1,\dots,m$.  
+These sets form a disjoint partition of $U$, and in particular $A_m = X$.
+
+For a uniformly random $n$-subset $\widehat{X}$, define
+\[
+k_r := |\widehat{X} \cap A_r|, \qquad r=0,\dots,m,
+\]
+so that $\sum_{r=0}^m k_r = n$.  
+Then
+\[
+W(X,\widehat{X})
+=
+\sum_{r=0}^m \frac{r}{m} k_r.
+\]
+
+Because $\widehat{X}$ is sampled uniformly from all $n$-subsets of $U$, the count vector
+\[
+(k_0,\dots,k_m)
+\]
+follows a multivariate hypergeometric distribution with category sizes $(M_0,\dots,M_m)$ and sample size $n$. Hence
+\[
+\Pr[k_0,\dots,k_m]
+=
+\frac{\prod_{r=0}^m \binom{M_r}{k_r}}{\binom{N}{n}}
+\]
+for all nonnegative vectors satisfying $\sum_{r=0}^m k_r = n$.
+
+The event $\{W(X,\widehat{X}) \ge j\}$ is equivalent to
+\[
+\sum_{r=0}^m \frac{r}{m}k_r \ge j,
+\]
+or equivalently $\sum_{r=0}^m r\,k_r \ge mj$.  
+Summing the above probability over all admissible count vectors satisfying this condition yields~\eqref{eq:discrete_fuzzy_prior}.
+\end{proof}
+
+\section{Weight-Dependent Noise Calibration}
+
+In this section, we connect the weighted temporal membership inference framework to noise calibration rules for learnable obfuscation mechanisms of the form $\mathcal{M}(X) = \Pi M_{\mathrm{mix}} X W + B$, combining mixing, permutation, masking, and additive noise. Our goal is to determine how much additional noise is required when the adversary receives graded (fractional-weight) credit for near-miss predictions.
+
+\subsection{Mutual Information Bounds under Mixing and Masking}
+
+We recall the key mutual information bounds from~\cite{xiao2024formal} that serve as the starting point for our calibration analysis.
+
+\begin{theorem}[Inference Regarding Entire Set $X$; {\cite[Theorem~2]{xiao2024formal}}]
+\label{thm:mi_masking}
+When $W \in \mathbb{R}^{d_0 \times d}$ and $B \in \mathbb{R}^{n \times d}$ are two independent random matrices, where each entry of $W$ is i.i.d.\ $\mathcal{N}(0,1)$ and each column of $B$ is i.i.d.\ $\mathcal{N}(0, \Sigma_B)$ for some non-singular $\Sigma_B$, then for $X$ consisting of $n$ randomly generated data points,
+\begin{equation}
+\label{eq:mi_masking_bound}
+\MI(X; XW + B) \le \frac{d}{2} \min \{ \mathrm{(I)}, \mathrm{(II)} \},
+\end{equation}
+where $\Sigma_X = XX^T$, $\Sigma_{X,B} = XX^T + \Sigma_B$, $X'$ is an independent copy of $X$, and
+\begin{align*}
+\mathrm{(I)} &:= \mathbb{E}_{X,X'}\!\left[
+\mathrm{Tr}\!\left(
+\Sigma_{X,B}^{-1}\Sigma_{X',B}
+\right) - n
+\right], \\
+\mathrm{(II)} &:= \log \det\!\Bigl(
+\mathbb{E}_X\!\bigl[
+I_n + \Sigma_B^{-1}\Sigma_X
+\bigr]
+\Bigr) \\
+&\quad - \mathbb{E}_X\!\biggl[
+\log \det\!\Bigl(
+I_n + \Sigma_B^{-1}\Sigma_X
+\Bigr)
+\biggr].
+\end{align*}
+\end{theorem}
+
+When isotropic noise $\Sigma_B = \sigma I_n$ is used, the bound specializes as follows.
+
+\begin{corollary}[Isotropic noise]
+\label{cor:thm2_isotropic}
+Under the setting of Theorem~\ref{thm:mi_masking} with $\Sigma_B = \sigma I_n$,
+\begin{equation*}
+\MI(X; XW + B) \;\le\; \frac{d}{2} \min \{ \mathrm{(I)}, \mathrm{(II)} \},
+\end{equation*}
+where
+\begin{align*}
+\mathrm{(I)} &:= \mathbb{E}_{X,X'}\!\bigl[
+\mathrm{Tr}\bigl(
+(XX^\top {+} \sigma I_n)^{-1}(X'X'^\top {+} \sigma I_n)
+\bigr) - n
+\bigr], \\
+\mathrm{(II)} &:= \log \det\!\bigl(
+\mathbb{E}_X\bigl[
+I_n + \tfrac{1}{\sigma}\Sigma_X
+\bigr]
+\bigr) \\
+&\quad - \mathbb{E}_X\bigl[
+\log \det\bigl(
+I_n + \tfrac{1}{\sigma}\Sigma_X
+\bigr)
+\bigr].
+\end{align*}
+\end{corollary}
+
+\paragraph{Mixing and permutation bounds.}
+\cite{xiao2024formal} further show (their Theorems~4--5) that when data mixing $M_{\mathrm{mix}}$ and permutation $\Pi$ are applied prior to masking and noise, the mutual information bounds~\eqref{eq:mi_masking_bound} hold with $X$ replaced by $\tilde{X} = \Pi M_{\mathrm{mix}} X$. The Type~(I) and~(II) bounds become functions of $\tilde{X}\tilde{X}^T$ rather than $XX^T$. Mixing stabilizes the Gram matrix by averaging over $k$ elements per class in each mixed sample, making $\tilde{X}\tilde{X}^T$ less sensitive to individual datapoint substitutions; permutation eliminates ordering-dependent instabilities. Together, these reduce the mutual information bound by up to an order of magnitude relative to masking alone (see Figure~1 and Tables~1--5 of~\cite{xiao2024formal}).
+
+Mutual information is a property of joint distribution $(X, \mathcal{M}(X))$ and does not depend on the adversary's reward structure. Therefore, all mutual information bounds from~\cite{xiao2024formal}, including those incorporating mixing and permutation, hold unchanged in the weighted inference setting. The weight resolution affects only the adversary's \emph{prior success probability}, which enters through a separate factor in the adversary's success bound. We formalize this separation in the theorems below.
+
+\subsection{Noise Calibration under Half-Integer Weights}
+
+We first recall the adversary success bound from Lemma~\ref{lem:membership-hardness}, which is an adaptation of~\cite[Corollary~1]{xiao2024formal}. For any processing mechanism $\mathcal{M}$, the average membership success there is bounded by a single un-factored sum,
+\[
+1 - \bar{\delta}
+\;\le\;
+\sum_{j=1}^{n}
+\frac{\MI(X;\mathcal{M}(X)) + (\log 2)/n}{D_j},
+\]
+where $D_j := -\log\!\big(1-\delta_0^{\ge j}\big)$ and $\delta_0^{\ge j}$ is the optimal a priori probability that a random guess achieves weighted overlap at least $j$, obtained in closed form from the stratified-hypergeometric distribution of the overlap between two independent $n$-subsets of the $c$-category universe. Since the numerator is independent of $j$, it factors out of the sum, giving the equivalent form
+\begin{equation}
+\label{eq:success_bound_recall}
+\begin{gathered}
+1 - \bar{\delta}
+\;\le\;
+\big(\MI(X;\mathcal{M}(X)) + (\log 2)/n\big)\cdot C, \\
+C := \sum_{j=1}^{n} \frac{1}{D_j}.
+\end{gathered}
+\end{equation}
+This factoring isolates the dependence of the bound on the adversary's reward structure: the mutual-information term depends only on the mechanism, while $C$ depends only on the weight structure through $\delta_0^{\ge j}$. Changing the weight resolution from integer to $1/m$ modifies $D_j$, and therefore $C$, but leaves $\MI(X;\mathcal{M}(X))$ unchanged. This separation reduces the calibration arguments below to comparisons of the ratio $C_{\mathrm{int}}/C_{1/m}$.
+
+Under integer weights, $\delta_0^{\ge j}$ is determined by the standard hypergeometric distribution (Corollary~1), yielding $C_{\mathrm{int}}$. Under half-integer weights, Lemma~3 gives strictly larger prior success probabilities, yielding $C_{\mathrm{half}} > C_{\mathrm{int}}$. The following theorem determines the noise required to neutralize this increase.
+
+\begin{theorem}[Half-integer noise calibration]
+\label{thm:half_int_calibration}
+Consider the mechanism $\mathcal{M}(X) = XW + B$ with $W$ having i.i.d.\ $\mathcal{N}(0,1)$ entries and $B$ having i.i.d.\ $\mathcal{N}(0,\sigma)$ entries. Let $C_{\mathrm{int}}$ and $C_{\mathrm{half}}$ denote the prior constants in~\eqref{eq:success_bound_recall} under integer and half-integer weights, respectively. Suppose that under integer weights with noise variance $\sigma_{\mathrm{int}}$, the adversary's success is bounded by
+\[
+1 - \bar{\delta}_{\mathrm{int}}
+\;\le\;
+\big(\MI_{\mathrm{int}} + \log 2\big)\, C_{\mathrm{int}},
+\]
+where $\MI_{\mathrm{int}} := \frac{d}{2}\min\{(I_{\sigma_{\mathrm{int}}}),(II_{\sigma_{\mathrm{int}}})\}$ is the mutual information upper bound from Theorem~\ref{thm:mi_masking}.
+
+Then the adversary's success under half-integer weights is no larger than $1 - \bar{\delta}_{\mathrm{int}}$ provided the noise variance $\sigma_{\mathrm{half}} \ge \sigma_{\mathrm{int}}$ satisfies
+\begin{multline}
+\label{eq:half_calibration}
+\frac{d}{2}\min\{(I_{\sigma_{\mathrm{half}}}),(II_{\sigma_{\mathrm{half}}})\}
+\\
+\le\;
+\bigl(\MI_{\mathrm{int}} + \log 2\bigr)\,\frac{C_{\mathrm{int}}}{C_{\mathrm{half}}}
+- \log 2.
+\end{multline}
+Moreover, when mixing and permutation are applied, the same condition holds with the Type~(I) and~(II) bounds evaluated on $\tilde{X} = \Pi M_{\mathrm{mix}} X$ in place of $X$.
+\end{theorem}
+
+\begin{proof}
+Under half-integer weights, the adversary's success bound~\eqref{eq:success_bound_recall} becomes
+\[
+1 - \bar{\delta}_{\mathrm{half}}
+\;\le\;
+\big(\MI_{\mathrm{half}} + \log 2\big)\, C_{\mathrm{half}},
+\]
+where $\MI_{\mathrm{half}}$ is the mutual information upper bound at noise level $\sigma_{\mathrm{half}}$. We require $1 - \bar{\delta}_{\mathrm{half}} \le 1 - \bar{\delta}_{\mathrm{int}}$, i.e.,
+\[
+\big(\MI_{\mathrm{half}} + \log 2\big)\, C_{\mathrm{half}}
+\;\le\;
+\big(\MI_{\mathrm{int}} + \log 2\big)\, C_{\mathrm{int}}.
+\]
+Rearranging for $\MI_{\mathrm{half}}$:
+\[
+\MI_{\mathrm{half}}
+\;\le\;
+\big(\MI_{\mathrm{int}} + \log 2\big)\,\frac{C_{\mathrm{int}}}{C_{\mathrm{half}}}
+\;-\; \log 2.
+\]
+Since $C_{\mathrm{half}} > C_{\mathrm{int}}$ (because $\delta_{0,\mathrm{half}}^{\ge j} \ge \delta_{0,\mathrm{int}}^{\ge j}$ for all $j$ by Lemma~3, which gives $D_{j,\mathrm{half}} \le D_{j,\mathrm{int}}$), the right-hand side is strictly less than $\MI_{\mathrm{int}}$. By Theorem~\ref{thm:mi_masking}, the mutual information bound $\frac{d}{2}\min\{(I_\sigma),(II_\sigma)\}$ is monotonically decreasing in $\sigma$. Therefore, there exists $\sigma_{\mathrm{half}} \ge \sigma_{\mathrm{int}}$ satisfying~\eqref{eq:half_calibration}, and any such $\sigma_{\mathrm{half}}$ ensures $1 - \bar{\delta}_{\mathrm{half}} \le 1 - \bar{\delta}_{\mathrm{int}}$.
+
+For the mixing extension, mutual information is a divergence between the joint distribution $(X, \mathcal{M}(X))$ and the product of marginals, and hence depends only on the mechanism and data distribution, not on the adversary's reward structure. The Type~(I) and~(II) bounds from Theorems~4--5 of~\cite{xiao2024formal} therefore apply without modification under half-integer weights, with $X$ replaced by $\tilde{X}$.
+\end{proof}
+
+\subsection{Noise Calibration under $1/m$-Resolution Weights}
+
+We now extend the calibration to arbitrary fractional-weight resolution.
+
+\begin{theorem}[General $1/m$-resolution noise calibration]
+\label{thm:general_m_calibration}
+In the same setting as Theorem~\ref{thm:half_int_calibration}, let $m \ge 2$ be an integer specifying the weight resolution, so that weights take values in $\{0, 1/m, 2/m, \dots, 1\}$. Let $C_{1/m}$ denote the prior constant in~\eqref{eq:success_bound_recall} computed using the $1/m$-resolution prior success probabilities from Lemma~4. Then:
+\begin{enumerate}[label=(\roman*)]
+    \item $C_{1/m} \ge C_{\mathrm{int}}$, with equality if and only if $M_r = 0$ for all $1 \le r \le m-1$ (no fractional-weight elements).
+
+    \item The adversary's success under $1/m$-resolution weights is no larger than $1 - \bar{\delta}_{\mathrm{int}}$ provided the noise variance $\sigma_{1/m} \ge \sigma_{\mathrm{int}}$ satisfies
+    \begin{multline}
+    \label{eq:m_calibration}
+    \frac{d}{2}\min\{(I_{\sigma_{1/m}}),(II_{\sigma_{1/m}})\}
+    \\
+    \le\;
+    \bigl(\MI_{\mathrm{int}} + (\log 2)/n\bigr)\,\frac{C_{\mathrm{int}}}{C_{1/m}}
+    - (\log 2)/n.
+    \end{multline}
+
+    \item Whenever $M_r > 0$ for some $1 \le r \le m-1$, the inequality in part~(i) is strict, and the required noise variance satisfies $\sigma_{1/m} > \sigma_{\mathrm{int}}$: the presence of any fractional-weight elements forces strictly more noise than the integer-weight baseline.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+\textbf{Part (i).} Fix a threshold $j \in \{1,\dots,n\}$. For any realization of the count vector $(k_0,\dots,k_m)$ drawn from the $1/m$-resolution multivariate hypergeometric of Lemma~4, the integer overlap on the same $\widehat{X}$ equals $W_{\mathrm{int}} = k_m$, whereas the $1/m$-resolution overlap is
+\[
+W_{1/m}
+\;=\;
+k_m + \sum_{r=1}^{m-1}\frac{r}{m}k_r
+\;\ge\; k_m
+\;=\; W_{\mathrm{int}},
+\]
+with strict inequality whenever some $k_r > 0$ for $1 \le r \le m-1$. Hence $\{W_{\mathrm{int}} \ge j\} \subseteq \{W_{1/m} \ge j\}$ as events on the same probability space, so
+\[
+1 - \delta_{0,1/m}^{\ge j}
+\;\ge\;
+1 - \delta_{0,\mathrm{int}}^{\ge j},
+\]
+which gives $D_{j,1/m} \le D_{j,\mathrm{int}}$ for every $j$, and summing yields $C_{1/m} \ge C_{\mathrm{int}}$. Equality holds throughout iff $k_r = 0$ almost surely for all $1 \le r \le m-1$, i.e.\ iff $M_r = 0$ for those $r$.
+
+\textbf{Part (ii).} By~\eqref{eq:success_bound_recall} the adversary's success under $1/m$-resolution weights satisfies
+\[
+1 - \bar{\delta}_{1/m}
+\;\le\;
+\big(\MI_{1/m} + (\log 2)/n\big)\, C_{1/m}.
+\]
+Requiring $1 - \bar{\delta}_{1/m} \le 1 - \bar{\delta}_{\mathrm{int}} \le (\MI_{\mathrm{int}} + (\log 2)/n)\, C_{\mathrm{int}}$ and rearranging yields
+\[
+\MI_{1/m}
+\;\le\;
+\big(\MI_{\mathrm{int}} + (\log 2)/n\big)\,\frac{C_{\mathrm{int}}}{C_{1/m}}
+\;-\; (\log 2)/n.
+\]
+Since $C_{1/m} \ge C_{\mathrm{int}}$ by part~(i), the right-hand side is at most $\MI_{\mathrm{int}}$. By Theorem~\ref{thm:mi_masking} the mutual information bound is monotonically decreasing in $\sigma$, so there exists $\sigma_{1/m} \ge \sigma_{\mathrm{int}}$ satisfying~\eqref{eq:m_calibration}.
+
+\textbf{Part (iii).} Under the hypothesis $M_r > 0$ for some $1 \le r \le m-1$, the event-inclusion in part~(i) is strict with positive probability, so $C_{1/m} > C_{\mathrm{int}}$. The right-hand side of~\eqref{eq:m_calibration} is therefore strictly less than $\MI_{\mathrm{int}}$, and strict monotonicity of the mutual information bound in $\sigma$ (Theorem~\ref{thm:mi_masking}) forces $\sigma_{1/m} > \sigma_{\mathrm{int}}$.
+\end{proof}
+
+Theorems~\ref{thm:half_int_calibration} and~\ref{thm:general_m_calibration} make precise the privacy cost of weighted inference. The ratio $C_{\mathrm{int}}/C_{1/m} < 1$ quantifies how much the adversary's prior advantage increases at resolution $1/m$; the mechanism must compensate by reducing mutual information by the same factor. When data mixing is applied, the mutual information is already reduced (per the bounds of~\cite{xiao2024formal}), partially offsetting the increased prior. The privacy--utility relationship thus depends on the interplay between mixing intensity (which reduces $\MI$) and weight resolution (which increases $C$). A direct consequence is that even modest relaxation of the correctness criterion---from exact membership ($m=1$) to half-integer proximity ($m=2$)---can require substantially more noise to maintain equivalent privacy, motivating the experimental comparison in Section~\ref{sec:experiments}.
+
+
+\section{Experiments}
+\label{sec:experiments}
+
+We empirically evaluate the theoretical results of Sections~4 and~5 on UCF-101 action recognition dataset~\cite{soomro2012ucf101}. Section~\ref{subsec:exp_setup} describes the pipeline shared by the downstream classifier and the temporal membership inference attack. Section~\ref{subsec:numerical_validation} numerically evaluates Theorems~\ref{thm:half_int_calibration} and~\ref{thm:general_m_calibration} on the universe used in Lemma~3's visualization. Section~\ref{subsec:mia_operating_point} reports empirical attack scores at a representative operating point against closed-form chance baselines, and Section~\ref{subsec:utility} reports downstream classifier accuracy across the noise sweep.
+
+\subsection{Experimental Setup}
+\label{subsec:exp_setup}
+
+Our experimental design follows the protocol of~\cite{xiao2024formal}: the data owner applies the obfuscation mechanism to features that have already been embedded by an ImageNet-pretrained backbone, so that the embedding plays the role of an implicit random projection $W$ in Algorithm~1 of~\cite{xiao2024formal}. This pipeline mitigates the ill-conditioning of raw data matrices that would otherwise make the mutual information bounds of Theorem~\ref{thm:mi_masking} (and Theorems~4--5 of~\cite{xiao2024formal}) numerically vacuous; similar to prior work, we adopt a ResNet-18 backbone on UCF-101 frames. The temporal membership inference attack additionally evaluates the explicit form of the mechanism on flattened pixels, so the projection $W$ is also instantiated and analyzed directly.
+
+We evaluate on UCF-101 split~1, an action recognition benchmark with $c = 101$ classes containing $9{,}537$ training clips and $3{,}783$ test clips. To make the per-clip frame-index universe uniform across the dataset, every clip is preprocessed by a fixed-length trim: clips with fewer than $L = 100$ frames are dropped, and longer clips are truncated to their first $L$ frames. After trimming, $7{,}954$ training clips are retained.  Each clip is embedded by drawing $T = 16$ frame indices uniformly without replacement from $[0, L)$, resizing each frame to $224 \times 224$, and passing it through a pretrained ResNet-18 backbone (ImageNet-1K weights, classification head removed) to produce a per-clip representation of shape $(T, d_0)$ with $d_0 = 512$, L2-normalized along the feature dimension. The choice of random rather than deterministic sampling reflects a deliberate trade-off between utility and privacy. Deterministic sampling (e.g., \texttt{linspace} over $[0, L)$) is the natural choice for the downstream classifier, since fixed indices give the temporal model consistent frame coverage across clips and let it exploit the temporal structure of action sequences. However, fixed indices also collapse the index-inference task: an adversary who knows the sampling rule recovers the true frame indices for every clip without observing $\mathcal{M}(X)$ at all. Random per-clip sampling restores a meaningful inference task. We use the same random sampling rule for the downstream classifier and the temporal membership inference attack so that the two pipelines see the same data distribution. Overall, the trimming and sampling define the temporal membership inference universe of size $|U| = 7{,}954 \times 16 = 127{,}264$ candidate (clip, index) pairs.
+
+Both the obfuscated classifier and its no-obfuscation baseline train on a stratified subset of exactly $50$ clips per class ($n = 5{,}050$ total), share the same temporal classifier---a Transformer encoder ($2$ layers, $8$ heads, $d_{\mathrm{ff}} = 512$, dropout $0.1$, learnable \texttt{[CLS]} token, learned positional embeddings, applied to the $(T, d_0)$ frame-embedding sequence and read off from the \texttt{[CLS]} token)---and use the same Adam optimizer (learning rate $10^{-3}$, batch size $64$, $50$ epochs). The obfuscation mechanism is the one defined in Section~\ref{sec:preliminary}; the downstream classifier sees $\mathcal{M}(X) = \Pi_1 M_{\mathrm{mix}} X + B$ on cached per-frame embeddings (the ResNet-18 frame encoder absorbs the projection $W$, so no further $W$ is applied), and the temporal membership inference attack uses the explicit form $T_X(X) = \Pi_1 M_{\mathrm{mix}} X W + B$ with $W \in \mathbb{R}^{d_0 \times d}$, $W_{ij} \sim \mathcal{N}(0, 1/d)$, $d = 500$, applied to flattened grayscale frames of size $112 \times 112$. Class-$k$ mixing $M_{\mathrm{mix}}$ produces $m = c^2 = 10{,}201$ mixed samples by sampling, for each ordered class pair $(i, j) \in [c] \times [c]$, $k$ clip-embeddings from class $i$ and $k$ from class $j$ and averaging them frame-by-frame; the soft target is one-hot on class $i$ when $i = j$, and places mass $1/2$ on each class otherwise. For $k = 0$ no mixing is applied and the classifier is trained on the $n = 5{,}050$ raw embeddings with one-hot targets. Soft targets are passed directly to a soft-label cross-entropy loss without collapsing to hard labels.
+
+Figure~\ref{fig:visual_obfuscation} visualizes the mechanism in pixel space at illustrative parameters $(k, \sigma) = (5, 0.1)$, with the projection $W$ omitted for visual clarity.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{figure5_visual_obfuscation_pixel.pdf}
+\caption{Pixel-space visualization of the obfuscation pipeline at $(k, \sigma) = (5, 0.1)$.}
+\label{fig:visual_obfuscation}
+\end{figure}
+
+%% =================================================================
+%% REVISED Numerical Evaluation (Table 1)
+%% Addresses: A4 (explicitly label C_half in Table 1)
+%% =================================================================
+
+\subsection{Numerical Evaluation of Theorems~\ref{thm:half_int_calibration} and~\ref{thm:general_m_calibration}}
+\label{subsec:numerical_validation}
+
+\begin{table}[!htbp]
+\centering\small
+\caption{Results for Analyses in Theorems~\ref{thm:half_int_calibration} and~\ref{thm:general_m_calibration}. $C_{\mathrm{int}}$ and $C_{\mathrm{half}}$ denote the prior-dependent factors in the adversary success bound of Lemma~\ref{lem:membership-hardness} under integer and half-integer weights, respectively.}
+\label{tab:calibration}
+\begin{tabular}{lrrr}
+\toprule
+Weight rule & $C$ & $C / C_{\mathrm{int}}$ & $\sigma / \sigma_{\mathrm{int}}$ \\
+\midrule
+Integer ($C_{\mathrm{int}}$) & 20.77 & 1.00 & 1.00 \\
+Half-integer ($C_{\mathrm{half}}$) & 651.8 & 31.38 & 5.60 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:calibration} numerically evaluates Theorems~\ref{thm:half_int_calibration} and~\ref{thm:general_m_calibration} on the universe used in Lemma~3's visualization (Figure~\ref{fig:prior_success}, $N = 1000$, $n = 50$, $m = 100$, $q = 0.05$). The constant $C := \sum_{j=1}^n 1/D_j$ with $D_j = -\log(1 - \delta_0^{\ge j})$ is the prior-dependent factor in the adversary success bound of Lemma~\ref{lem:membership-hardness}, and the ratio $C_{\mathrm{half}}/C_{\mathrm{int}}$ controls how much additional noise the mechanism must inject to preserve the same MI-based privacy guarantee under half-integer scoring (Theorem~\ref{thm:half_int_calibration}).
+
+The numerical evaluation makes two points concrete. First, it confirms that the strict inequality $C_{\mathrm{half}} > C_{\mathrm{int}}$ predicted by Theorem~\ref{thm:general_m_calibration} part~(i) is not a vacuous one: at half-integer resolution on this universe, $C$ inflates by $31\times$, so even the simplest fractional-weight relaxation incurs an order-of-magnitude penalty on the prior factor. Second, translating the inflation through the $\mathrm{MI} \sim 1/\sigma^2$ approximation of Theorem~\ref{thm:mi_masking} gives a multiplicative noise inflation of $\sqrt{C_{\mathrm{half}}/C_{\mathrm{int}}} \approx 5.6\times$ to maintain the same MI-based bound: the privacy cost of weighted inference is a large constant factor in $\sigma$, not a marginal correction.
+
+%% =================================================================
+%% REVISED MIA Section
+%% Addresses: B6 (multiple (k,sigma) in attack table), A2 (binary baseline)
+%% =================================================================
+
+\subsection{Empirical Weighted Membership Inference}
+\label{subsec:mia_operating_point}
+
+We instantiate the weighted membership inference attack at multiple operating points and report two attack scenarios against the closed-form random-guess and no-obfuscation baselines. We report scores under both weighted (half-credit) and binary (exact-match-only) scoring rules, allowing direct comparison to the standard membership inference setting of~\cite{xiao2024formal}. The attacks share one likelihood-ratio scoring core, adapted from the Likelihood Ratio Attack (LiRA) of Carlini \textit{et al.}~\cite{carlini2022firstprinciples}. LiRA scores each candidate by the log-likelihood ratio of two Gaussian hypotheses---``the candidate was a member'' versus ``the candidate was a non-member''---under the noise model of the release. We instantiate this idea in our obfuscation setting as follows: the attacker forms a residual $r := o - \mathcal{M}(X_{\mathrm{cf}})$ between the observed release $o$ and the mechanism applied to a same-class counterfactual dataset $X_{\mathrm{cf}}$, and ranks each candidate $c$ by
+\[
+\mathrm{LR}(c) = \frac{r \cdot \Delta_c}{\sigma^2} - \frac{1}{2} \frac{\|\Delta_c\|^2}{\sigma^2},
+\]
+where $\Delta_c$ is the candidate-specific predicted difference between the two hypotheses, evaluated at $c$'s mixed-row positions. This is the log-likelihood ratio of the two Gaussian hypotheses under additive noise of variance $\sigma^2$, modulo a constant that does not affect ranking. The full procedure is detailed in Algorithm~\ref{alg:attack}.
+
+ The two attacks differ only in which set of candidates is ranked and how the top-ranked guesses are scored. \emph{Attack~1 (index inference)} models an \textit{informed} adversary who knows the target clip and is asked to recover its frame indices: it ranks the $L = 100$ candidate frame indices for the target clip and emits the top-$T$, scored under a half-credit rule with a $\pm 2$-frame temporal-proximity window: an exact (clip, index) match earns $1$, a same-clip guess within $\pm 2$ of any true frame earns $0.5$, otherwise $0$. Under binary scoring, only exact matches earn credit.
+\emph{Attack~2 (frame-level membership inference)} models an \textit{uninformed} adversary with no side information about clip or class: it rank-orders a uniformly random subsample $U_2$ of $|U_2| = 2{,}016$ candidate (clip, index) pairs drawn from the full universe $|U| = 127{,}264$, with the $T = 16$ true target rows always included in $U_2$, and emits the top-$T$ guesses under the same scoring rules as Attack~1. The subsample is a tractability concession---scoring all $127{,}264$ candidates dominates cost---and does not give the adversary side information about which pairs are members: the truth is buried in $U_2$ alongside random distractors, and the chance baseline below is computed against the actual pool the adversary scored.
+
+\begin{table}[t]
+\centering\scriptsize
+\caption{Empirical membership inference scores at multiple operating points. ``Weighted'' uses the $\pm 2$-window half-credit rule; ``Binary'' scores only exact matches. Standard errors ($\mathrm{std}/\sqrt{50}$) in parentheses where logged. The No-obf.\ and Chance columns report the \emph{Attack~1} baselines; Attack~2's no-obfuscation baseline is $0.835$ and its chance baseline is $0.008$. Attack~2's weighted and binary scores coincide because its subsampled candidate pool contains only exact target rows, with no near-miss frames to receive partial credit. Full $(k,\sigma)$ sweep in Appendix~\ref{app:sigma_sweep}.}
+\label{tab:operating_point}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{llrrrr}
+\toprule
+$(k, \sigma)$ & Scoring & Attack~1 & Attack~2 & No-obf. & Chance \\
+\midrule
+\multirow{2}{*}{$(0, 0.05)$}
+& Weighted & $0.441\,(0.017)$ & $0.751\,(0.049)$ & $0.460$ & $0.373$ \\
+& Binary   & $0.182$ & $0.751\,(0.049)$ & $0.235$ & $0.160$ \\
+\midrule
+\multirow{2}{*}{$(1, 0.05)$}
+& Weighted & $0.509\,(0.013)$ & $0.657\,(0.055)$ & $0.460$ & $0.373$ \\
+& Binary   & $0.230$ & $0.657\,(0.055)$ & $0.235$ & $0.160$ \\
+\midrule
+\multirow{2}{*}{$(1, 0.10)$}
+& Weighted & $0.454\,(0.020)$ & $0.439\,(0.050)$ & $0.460$ & $0.373$ \\
+& Binary   & $0.205$ & $0.439\,(0.050)$ & $0.235$ & $0.160$ \\
+\midrule
+\multirow{2}{*}{$(5, 0.10)$}
+& Weighted & $0.482\,(0.019)$ & $0.647\,(0.042)$ & $0.460$ & $0.373$ \\
+& Binary   & $0.233$ & $0.647\,(0.042)$ & $0.235$ & $0.160$ \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\paragraph{Random-guess baselines.}
+The Chance column in Table~\ref{tab:operating_point} is computed in closed form, separately for each attack, against the candidate pool the attack actually scored. \emph{Attack~1} averages over guesses uniformly distributed in the $L = 100$-frame target clip; under the $\pm 2$-window half-credit rule, the expected score is
+\[
+\frac{T}{L} + \frac{1}{2}\left(\frac{\mathbb{E}\lvert N\rvert}{L} - \frac{T}{L}\right) \;\approx\; 0.373,
+\]
+
+\emph{Attack~2} averages over guesses uniformly drawn from the subsample $U_2$. Because the universe contains only $T$ sampled (clip, index) rows per clip, every row in $U_2$ that lies in the target clip is one of the $T$ true target rows; there are no ``near, not exact'' rows in $U_2$ to receive half credit. Under the $\pm 2$-window rule, the expected score therefore reduces to the exact-match probability,
+\[
+\frac{T}{|U_2|} \;=\; \frac{16}{2{,}016} \;\approx\; 0.0079.
+\]
+
+Table~\ref{tab:operating_point} reports the attack scores against these baselines, evaluated over $n_{\mathrm{targets}} = 10$ target clips with $n_{\mathrm{trials}} = 5$ Monte Carlo trials each ($n = 50$ samples). Weighted and binary scores are computed on the \emph{same} ranked guesses, so their difference isolates the effect of the scoring rule from the attack strategy. The comparison confirms the paper's central premise empirically. For the informed adversary (Attack~1), weighted scoring reports $0.44$--$0.51$ while binary scoring reports only $0.18$--$0.23$ on the identical guesses: measuring leakage by exact recovery alone misses roughly half of what a temporal-proximity metric detects, because the mechanism frequently leaks the approximate location of a member frame without leaking its exact index. For the uninformed adversary (Attack~2), the weighted and binary scores coincide, because its candidate pool contains only the $T$ exact target rows per clip (no near-miss frames survive the subsampling), so there is nothing for partial credit to reward; the leakage there is genuine exact-membership leakage.
+
+The attacks demonstrate that the obfuscation mechanism reduces privacy leakage relative to a no-obfuscation baseline while still leaking non-trivial information about the underlying clips and frames: the gap above chance is large in absolute terms, even when the adversary has no side information (Attack~2). Results also show that obfuscation is substantially more effective for an uninformed adversary (i.e., the more realistic scenario). This is consistent with, but does not numerically certify, the upper bound of Lemma~\ref{lem:membership-hardness}: that lemma guarantees the existence of a finite gap between adversary success and~$1$ as a function of $\MI(X; \mathcal{M}(X))$, which Theorem~\ref{thm:mi_masking} controls through the mechanism's mixing and additive noise. We do not claim to empirically verify the bound here---that would require a direct estimate of $\MI(X; \mathcal{M}(X))$, which we leave to future work (Section~\ref{sec:conclusion}). What this section establishes is operational: at representative $(k, \sigma)$ points across the viable noise range, the mechanism admits real residual leakage but does not saturate, and the leakage is consistent with the bound's qualitative prediction. We also refer the reader to additional results and analysis in the Appendix.
+\subsection{Utility}
+\label{subsec:utility}
+
+\begin{table}[t]
+\centering\small
+\caption{UCF-101 split-1 test accuracy across the $(k, \sigma)$ sweep.}
+\label{tab:utility}
+\begin{tabular}{ccrr}
+\toprule
+$k$ & $\sigma$ & Test Acc.\ (\%) & $\Delta$ vs.\ baseline (pp) \\
+\midrule
+\multicolumn{2}{c}{No obfuscation} & $60.19$ & --- \\
+\midrule
+$0$ & $0.01$ & $64.81$ & $+4.62$  \\
+$0$ & $0.05$ & $72.35$ & $+12.16$ \\
+$0$ & $0.10$ & $68.24$ & $+8.05$  \\
+$0$ & $0.50$ & $30.54$ & $-29.64$ \\
+\midrule
+$1$ & $0.01$ & $70.00$ & $+9.82$  \\
+$1$ & $0.05$ & $68.37$ & $+8.18$  \\
+$1$ & $0.10$ & $66.60$ & $+6.42$  \\
+$1$ & $0.50$ & $42.83$ & $-17.36$ \\
+\midrule
+$5$ & $0.01$ & $66.92$ & $+6.74$  \\
+$5$ & $0.05$ & $66.67$ & $+6.48$  \\
+$5$ & $0.10$ & $64.93$ & $+4.75$  \\
+$5$ & $0.50$ & $43.95$ & $-16.23$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:utility} reports test accuracy on UCF-101 split-1 across all twelve $(k, \sigma)$ configurations of the obfuscation mechanism, evaluated against a no-obfuscation baseline trained under the same random-sampling protocol; hard-argmax accuracy is computed on the raw test set with only the label permutation $\Pi_2$ inverted at evaluation. For $\sigma \le 0.10$, every obfuscated configuration exceeds the no-obfuscation baseline of $60.19\%$, with the peak ($+12.16$pp at $k = 0, \sigma = 0.05$) appearing in the low-noise interior; within this band the dependence on mixing intensity $k$ is weak and not strictly monotone. At $\sigma = 0.50$, utility collapses across all values of $k$, defining $\sigma \le 0.10$ as the mechanism's operable noise envelope.
+
+The fact that several low-noise configurations \emph{exceed} the no-obfuscation baseline is consistent with class-$k$ mixing acting as a mild regularizer at small $\sigma$; we report this as an empirical observation rather than as a privacy contribution.
+
+\paragraph{Connection to the calibration analysis.}
+The utility sweep complements the prior-cost analysis of Section~\ref{subsec:numerical_validation} by quantifying the noise budget within which the calibration-required inflation $\sigma_{\mathrm{half}} \ge \sqrt{C_{\mathrm{half}}/C_{\mathrm{int}}} \cdot \sigma_{\mathrm{int}}$ of Theorems~\ref{thm:half_int_calibration} and~\ref{thm:general_m_calibration} could in principle be absorbed without sacrificing downstream accuracy. On the universe of Lemma~3's visualization, the required inflation is $5.6\times$, which would push an integer-weight operating point of $\sigma_{\mathrm{int}} = 0.05$ to $\sigma_{\mathrm{half}} \approx 0.28$---outside the operable band identified here. Whether this is a binding constraint in a specific deployment depends on the deployment-specific universe: the inflation factor is determined by the actual weight-class layout $(M_0, M_1, \dots, M_m)$, which controls $C_{\mathrm{half}}/C_{\mathrm{int}}$, and may be substantially smaller than the value computed on Lemma~3's universe.
+
+%% =================================================================
+%% EXPANDED SECTION: Effect of Temporal Correlation on Privacy
+%% Replaces the short Section 7 in main_revised.tex
+%% Contains: 1 definition, 1 assumption, 4 theorems/lemmas, proofs
+%% =================================================================
+
+\section{Effect of Temporal Correlation on Privacy Guarantees}
+\label{sec:correlation_analysis}
+
+The preceding analysis retains the i.i.d.\ sampling assumption:
+frames in the dataset $X$ are drawn independently from the
+universe~$U$. This section develops a formal treatment of
+temporal correlation among frame embeddings, derives its
+consequences for the mutual information bounds and adversary
+success, and identifies the conditions under which
+independent noise injection fails to provide the intended
+privacy guarantee.
+
+\subsection{Temporal Correlation Model}
+
+\begin{definition}[Temporally correlated frame model]
+\label{def:temporal_correlation}
+Let $U = \{u_1, \ldots, u_N\}$ be a universe of video frames
+arranged in temporal order within $N/L$ clips of $L$ frames
+each. Each frame $u_t$ has an embedding
+$\phi(u_t) \in \mathbb{R}^{d_0}$. We say the embeddings
+follow a \emph{stationary temporal correlation model} with
+autocorrelation function $\rho : \mathbb{Z}_{\ge 0} \to [0,1]$
+if, for frames $u_s, u_t$ within the same clip,
+\[
+\frac{
+  \mathbb{E}[(\phi(u_s) - \bar\phi)^\top(\phi(u_t) - \bar\phi)]
+}{
+  \mathbb{E}[\|\phi(u_s) - \bar\phi\|^2]
+}
+= \rho(|s - t|),
+\]
+where $\bar\phi$ is the clip mean, and frames from different
+clips are independent. We assume $\rho(0) = 1$, $\rho$ is
+non-increasing, and $\rho(\tau) \ge 0$ for all $\tau$.
+\end{definition}
+
+Two concrete sampling strategies are relevant:
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Independent sampling.} Select $n$ frames
+  uniformly at random from~$U$, independently.  With high
+  probability for $n \ll N$, selected frames are spread across
+  many clips and
+  $\mathbb{E}[\phi(x_i)^\top\phi(x_j)] \approx \|\bar\phi\|^2$
+  for $i \neq j$.
+\item \textbf{Block-correlated sampling.}  Select $n/b$ clips
+  uniformly at random, then from each selected clip draw $b$
+  contiguous frames starting from a uniformly random position.
+  Within each block of $b$ frames, the pairwise embedding
+  correlation is $\rho(|s-t|)$ for positions $s, t$ within the
+  block.
+\end{enumerate}
+
+We write $R \in \mathbb{R}^{n \times n}$ for the temporal
+correlation matrix induced by the sampling strategy.  Under
+independent sampling, $R \approx I_n$.  Under block-correlated
+sampling, $R$ is block-diagonal with $n/b$ blocks, each a
+$b \times b$ Toeplitz matrix with entries $\rho(|s-t|)$.
+
+\subsection{Mutual Information under Temporal Correlation}
+
+We first establish how temporal correlation affects the mutual
+information between the dataset and the mechanism's output.
+The following assumption, satisfied by the Gaussian model
+commonly used in information-theoretic privacy
+analysis~\cite{russo2016controlling,raginsky2016information},
+enables exact computation.
+
+\begin{assumption}[Gaussian embedding model]
+\label{asm:gaussian}
+The centered frame embeddings
+$\tilde\phi(u_t) := \phi(u_t) - \bar\phi$ are jointly Gaussian
+with $\mathrm{vec}(\tilde X) \sim \mathcal{N}(0, R \otimes \Sigma_0)$,
+where $\Sigma_0 \in \mathbb{R}^{d_0 \times d_0}$ is a
+positive definite feature covariance and $R$ is the temporal
+correlation matrix from Definition~\ref{def:temporal_correlation}.
+\end{assumption}
+
+Under Assumption~\ref{asm:gaussian}, the following theorem
+gives an exact expression for the mutual information through
+the random-projection-plus-noise channel, and shows that
+temporal correlation cannot increase it.
+
+\begin{theorem}[MI reduction under temporal correlation]
+\label{thm:mi_correlation}
+Under Assumption~\ref{asm:gaussian}, consider the mechanism
+$\mathcal{M}(X) = XW + B$ with $W \in \mathbb{R}^{d_0 \times d}$
+having i.i.d.\ $\mathcal{N}(0,1)$ entries and
+$B \in \mathbb{R}^{n \times d}$ having i.i.d.\
+$\mathcal{N}(0, \sigma^2)$ entries, independent of $X$ and $W$.
+Let $\lambda_1(R) \ge \cdots \ge \lambda_n(R)$ denote the
+eigenvalues of the temporal correlation matrix~$R$.  Then:
+
+\begin{enumerate}[label=(\roman*)]
+\item The mutual information satisfies
+\begin{multline}
+\label{eq:mi_corr_exact}
+I(X;\mathcal{M}(X))
+\;\le\;
+\frac{1}{2}\sum_{i=1}^{n}\sum_{j=1}^{d}
+\\
+\mathbb{E}_W\!\left[
+  \log\!\left(1 + \sigma^{-2}\,\lambda_i(R)\,
+  \lambda_j(W^\top\!\Sigma_0 W)\right)
+\right].
+\end{multline}
+
+\item Let $I_R$ and $I_{I_n}$ denote the right-hand side
+of~\eqref{eq:mi_corr_exact} evaluated at correlation matrix
+$R$ and $I_n$ (independent sampling), respectively.  Then
+\begin{equation}
+\label{eq:mi_corr_ineq}
+I_R \;\le\; I_{I_n},
+\end{equation}
+with equality if and only if $R = I_n$.
+
+\item For the AR(1) autocorrelation $\rho(\tau) = \alpha^{|\tau|}$
+with $\alpha \in [0,1)$ and block size $b$, the MI gap satisfies
+\begin{multline}
+\label{eq:mi_gap_ar1}
+I_{I_n} - I_R
+\;\ge\;
+\frac{n}{2b}\sum_{j=1}^{d}
+\\
+\mathbb{E}_W\!\biggl[
+  b\log(1 + \sigma^{-2}\lambda_j)
+  - \sum_{i=1}^{b}\log(1 + \sigma^{-2}\mu_i \lambda_j)
+\biggr],
+\end{multline}
+where $\mu_1 \ge \cdots \ge \mu_b$ are the eigenvalues of
+the $b \times b$ Toeplitz correlation matrix
+$T_b = (\alpha^{|s-t|})_{s,t=1}^b$ and $\lambda_j =
+\lambda_j(W^\top\!\Sigma_0 W)$.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+\textbf{Part (i).}
+By the data processing inequality,
+$I(X;\mathcal{M}(X)) \le I(X;\mathcal{M}(X) \mid W)$, since $W$
+is independent of $X$.  Conditioned on $W$, the channel is
+$Y = XW + B$ with $XW \mid W$ Gaussian (by
+Assumption~\ref{asm:gaussian}) having row covariance
+$W^\top\!\Sigma_0 W$ and row-correlation $R$, so
+$\mathrm{Cov}(\mathrm{vec}(XW) \mid W) = R \otimes (W^\top\!\Sigma_0 W)$.
+The noise $B$ is independent with
+$\mathrm{Cov}(\mathrm{vec}(B)) = \sigma^2 I_{nd}$.  For Gaussian
+inputs and additive Gaussian noise,
+\begin{multline*}
+I(X; XW{+}B \mid W)
+\\
+= \tfrac{1}{2}\log\det\!\bigl(I_{nd} + \sigma^{-2}\,
+  R \otimes (W^\top\!\Sigma_0 W)\bigr).
+\end{multline*}
+Using $\det(I + A \otimes B) = \prod_{i,j}(1 + \lambda_i(A)\lambda_j(B))$
+for Kronecker products and taking the expectation over $W$ yields~\eqref{eq:mi_corr_exact}.
+
+\textbf{Part (ii).}
+Fix $W$ and any index $j$.  The function
+$f_j(x) = \log(1 + \sigma^{-2}x\,\lambda_j)$ is concave in $x$
+for $\lambda_j > 0$.  The eigenvalues of $R$ satisfy
+$\lambda_i(R) \ge 0$ and $\sum_i \lambda_i(R) = \mathrm{tr}(R) = n$
+(since the diagonal entries of a correlation matrix are~$1$).  By
+Jensen's inequality applied to the uniform distribution on
+$\{\lambda_1(R),\ldots,\lambda_n(R)\}$:
+\[
+\frac{1}{n}\sum_{i=1}^{n}
+  \log\!\bigl(1 + \sigma^{-2}\lambda_i(R)\lambda_j\bigr)
+\;\le\;
+\log\!\bigl(1 + \sigma^{-2}\lambda_j\bigr),
+\]
+with equality iff all $\lambda_i(R)$ are equal to $1$, i.e.\
+$R = I_n$.  Multiplying by $n$, summing over $j$, and taking the
+expectation over $W$ gives~\eqref{eq:mi_corr_ineq}.
+
+\textbf{Part (iii).}
+Under block-correlated sampling with $n/b$ independent blocks,
+$R = I_{n/b} \otimes T_b$.  The eigenvalues of $R$ are the
+eigenvalues of $T_b$ each with multiplicity $n/b$.  
+Substituting into~\eqref{eq:mi_corr_exact} and comparing term
+by term with the $R = I_n$ case yields~\eqref{eq:mi_gap_ar1}.
+The gap is non-negative by concavity of $\log$ and strict
+positivity of $\lambda_j$ with probability one.
+\end{proof}
+
+\paragraph{Interpretation.}
+Theorem~\ref{thm:mi_correlation} shows that temporal correlation
+\emph{reduces} the mutual information between the dataset and
+the mechanism's output: correlated rows carry less total information
+than independent rows.  At first glance, this appears to favor
+privacy.  However, the adversary's success bound
+from~\eqref{eq:success_bound_recall} depends on the
+\emph{product} $\mathrm{MI} \cdot C$, and the prior-cost
+constant $C$ can increase under correlation (as shown below),
+potentially outweighing the MI reduction.  The net effect on
+privacy depends on the relative magnitude of these two
+competing forces.
+
+\subsection{Adversary Success under Combined Correlation and Weighted Scoring}
+
+We now analyze how the adversary's success bound changes
+when temporal correlation and weighted scoring act jointly.
+The key insight is that the success bound
+of~\eqref{eq:success_bound_recall} factors as
+$(\mathrm{MI} + \mathrm{const}) \cdot C$, and
+Theorem~\ref{thm:mi_correlation} controls the first factor
+while the following result controls the second.
+
+\begin{definition}[Block-weighted prior]
+\label{def:block_weighted_prior}
+Under block-correlated sampling with block size $b$ and
+$1/m$-resolution weighted scoring with window half-width $\Delta$,
+the weight structure of the universe is determined by the
+block geometry.  Each of the $n/b$ sampled blocks occupies $b$
+contiguous frame positions.  The weight classes are:
+\begin{itemize}[leftmargin=*]
+\item $A_m = X$: the $n$ true members (weight $1$), consisting of
+  $n/b$ blocks of $b$ contiguous frames;
+\item $A_r$ for $1 \le r \le m-1$: frames at temporal distance
+  $\tau$ from the nearest block boundary, where
+  $r = m - \lceil m\tau/\Delta \rceil$, yielding weight $r/m$;
+\item $A_0$: all remaining frames (weight $0$).
+\end{itemize}
+Let $M_r^{\mathrm{block}}$ denote the cardinality of $A_r$ under
+the block geometry.  In the half-integer case ($m=2$), the half-weight
+class has size
+\begin{equation}
+\label{eq:m_block_half}
+M_1^{\mathrm{block}}
+= \min\!\left(\frac{2n\Delta}{b},\; N - n\right),
+\end{equation}
+where the factor $2/b$ relative to the scattered case
+$M_1^{\mathrm{scatter}} = \min(2n\Delta, N-n)$ reflects that
+$n/b$ block boundaries produce fewer half-weight neighborhoods
+than $n$ scattered frames.
+\end{definition}
+
+\begin{theorem}[Prior-cost ordering under block vs.\ scattered sampling]
+\label{thm:prior_block}
+Let $C^{\mathrm{block}}_{\mathrm{half}}$ and
+$C^{\mathrm{scatter}}_{\mathrm{half}}$ denote the prior-cost
+constants from~\eqref{eq:success_bound_recall} computed under
+half-integer weights with the block and scattered weight-class
+layouts of Definition~\ref{def:block_weighted_prior}, respectively.
+Then for block size $b \ge 2$,
+\begin{equation}
+\label{eq:prior_block_ordering}
+C_{\mathrm{int}}
+\;\le\;
+C^{\mathrm{block}}_{\mathrm{half}}
+\;\le\;
+C^{\mathrm{scatter}}_{\mathrm{half}},
+\end{equation}
+with the first inequality strict whenever $\Delta \ge 1$, and
+the second strict whenever $b \ge 2$ and $n\Delta < (N-n)/2$.
+\end{theorem}
+
+\begin{proof}
+The first inequality follows from Theorem~\ref{thm:general_m_calibration}
+part~(i): any nonzero fractional-weight class ($M_1^{\mathrm{block}} > 0$,
+which holds for $\Delta \ge 1$) gives
+$C^{\mathrm{block}}_{\mathrm{half}} > C_{\mathrm{int}}$.
+
+For the second inequality, observe that
+$M_1^{\mathrm{block}} \le M_1^{\mathrm{scatter}}$ whenever
+$b \ge 2$ (by~\eqref{eq:m_block_half}).  For any pair of
+weight-class layouts with $n$ full-weight elements,
+$M_1 \le M_1'$ implies
+$\delta_0^{\ge j,\mathrm{block}} \le \delta_0^{\ge j,\mathrm{scatter}}$
+for every threshold $j$, because enlarging the half-weight class
+stochastically increases the weighted overlap.  This follows from the
+coupling argument of Lemma~3: on the same probability space, sample
+$\hat{X}$ uniformly; the weighted overlap under $M_1'$ dominates
+the overlap under $M_1$ pathwise whenever
+$M_1' \ge M_1$ and $M_0' \le M_0$.  The dominance is strict for
+at least one $j$ under the stated conditions, giving strict inequality
+for the sum $C$.
+\end{proof}
+
+\paragraph{Interpretation.}
+Equation~\eqref{eq:prior_block_ordering} establishes that
+block-correlated sampling produces a prior-cost constant that
+lies \emph{between} the integer baseline and the scattered
+half-integer case.  Block sampling concentrates true members into
+clusters, reducing the number of half-weight boundary frames and
+thereby partially mitigating the prior-cost inflation from
+weighted scoring.  However, the prior cost still exceeds the
+integer baseline ($C_{\mathrm{int}}$), confirming that weighted
+scoring imposes a non-trivial privacy penalty regardless of the
+sampling geometry.
+
+\begin{theorem}[Combined noise calibration under correlation and weighted scoring]
+\label{thm:combined_calibration}
+Under the setting of Theorems~\ref{thm:mi_correlation}
+and~\ref{thm:prior_block}, the adversary's success under
+block-correlated sampling with half-integer weighted scoring is
+bounded by
+\begin{equation}
+\label{eq:combined_bound}
+1 - \bar\delta
+\;\le\;
+\bigl(I_R + (\log 2)/n\bigr) \cdot C^{\mathrm{block}}_{\mathrm{half}},
+\end{equation}
+where $I_R$ is the MI bound of Theorem~\ref{thm:mi_correlation}.
+To match the privacy guarantee $1 - \bar\delta_{\mathrm{int}}$
+of the i.i.d., integer-weight baseline, the noise must satisfy
+\begin{equation}
+\label{eq:combined_calibration}
+I_R(\sigma_{\mathrm{comb}})
+\;\le\;
+\bigl(I_{I_n}(\sigma_{\mathrm{int}}) + (\log 2)/n\bigr)
+\cdot \frac{C_{\mathrm{int}}}{C^{\mathrm{block}}_{\mathrm{half}}}
+\;-\; (\log 2)/n.
+\end{equation}
+
+Moreover, the required noise $\sigma_{\mathrm{comb}}$ satisfies
+\begin{equation}
+\label{eq:sigma_combined_bound}
+\sigma_{\mathrm{comb}}
+\;\ge\;
+\sigma_{\mathrm{int}}
+\cdot \sqrt{\frac{C^{\mathrm{block}}_{\mathrm{half}}}{C_{\mathrm{int}}}},
+\end{equation}
+where the square root arises from the $\mathrm{MI} \sim 1/\sigma^2$
+scaling of Theorem~\ref{thm:mi_masking}.  The ratio
+$C^{\mathrm{block}}_{\mathrm{half}} / C_{\mathrm{int}}$
+is bounded by
+\[
+1
+\;<\;
+\frac{C^{\mathrm{block}}_{\mathrm{half}}}{C_{\mathrm{int}}}
+\;\le\;
+\frac{C^{\mathrm{scatter}}_{\mathrm{half}}}{C_{\mathrm{int}}},
+\]
+so the combined noise inflation is at most the scattered-frame
+inflation of Theorem~\ref{thm:half_int_calibration} and at least
+the integer baseline.
+\end{theorem}
+
+\begin{proof}
+Inequality~\eqref{eq:combined_bound} follows directly from the
+success bound~\eqref{eq:success_bound_recall} applied to the
+block-correlated, half-integer setting.  The MI term uses the
+upper bound $I_R$ from Theorem~\ref{thm:mi_correlation}~(i),
+and the prior-cost constant is $C^{\mathrm{block}}_{\mathrm{half}}$
+from Theorem~\ref{thm:prior_block}.
+
+For~\eqref{eq:combined_calibration}: we require
+$1 - \bar\delta \le 1 - \bar\delta_{\mathrm{int}}$, where the
+baseline satisfies
+$1 - \bar\delta_{\mathrm{int}} \le
+(I_{I_n}(\sigma_{\mathrm{int}}) + (\log 2)/n) \cdot C_{\mathrm{int}}$.
+Substituting into~\eqref{eq:combined_bound} and rearranging for
+$I_R$ yields~\eqref{eq:combined_calibration}.
+
+For~\eqref{eq:sigma_combined_bound}: by
+Theorem~\ref{thm:mi_correlation}~(ii),
+$I_R(\sigma) \le I_{I_n}(\sigma)$ for all $\sigma$, so the
+constraint~\eqref{eq:combined_calibration} is no harder to
+satisfy than the pure weighted-scoring constraint
+of~\eqref{eq:half_calibration} applied with $C^{\mathrm{block}}_{\mathrm{half}}$
+in place of $C_{\mathrm{half}}$.  The $\mathrm{MI} \sim 1/\sigma^2$
+scaling then gives the square-root bound.  The two-sided bound
+on the ratio follows from Theorem~\ref{thm:prior_block}.
+\end{proof}
+
+Theorem~\ref{thm:combined_calibration} gives a complete picture
+of the noise requirement under joint correlation and weighted
+scoring.  The MI reduction from correlation
+(Theorem~\ref{thm:mi_correlation}) works \emph{in the defender's
+favor}, partially offsetting the prior-cost increase from weighted
+scoring.  The block geometry further reduces the prior cost
+relative to scattered frames
+(Theorem~\ref{thm:prior_block}).  The net noise inflation
+factor $\sqrt{C^{\mathrm{block}}_{\mathrm{half}}/C_{\mathrm{int}}}$
+is therefore strictly between $1$ and the scattered-frame factor
+$\sqrt{C^{\mathrm{scatter}}_{\mathrm{half}}/C_{\mathrm{int}}}$
+reported in Table~\ref{tab:calibration}.
+
+\subsection{Signal-to-Noise Degradation under Temporal Aggregation}
+
+The preceding analysis treats privacy through the lens of the
+MI bound and the adversary's prior.  A separate concern arises
+from the \emph{mechanism design}: when the downstream model or
+adversary aggregates information across temporally correlated
+frames, independent noise can be partially canceled, degrading
+the effective privacy guarantee.  The following result
+formalizes this observation.
+
+\begin{theorem}[Noise averaging under temporal aggregation]
+\label{thm:noise_averaging}
+Let $y_1, \ldots, y_b \in \mathbb{R}^d$ be $b$ rows of the
+mechanism's output $\mathcal{M}(X) = XW + B$, corresponding to $b$
+frames from the same temporal block.  Write $y_i = s_i + z_i$ where
+$s_i = (XW)_i$ is the signal and $z_i \sim \mathcal{N}(0, \sigma^2 I_d)$
+is the independent additive noise.  Suppose the signal components have
+pairwise correlation
+$\mathbb{E}[s_i^\top s_j] / (\mathbb{E}[\|s_i\|^2])^{1/2}
+(\mathbb{E}[\|s_j\|^2])^{1/2} = \rho(|i-j|)$ for $i \ne j$
+within the block.  Consider a linear aggregator that forms the
+block average $\bar{y} = \frac{1}{b}\sum_{i=1}^b y_i$.  Then:
+
+\begin{enumerate}[label=(\roman*)]
+\item The signal component of $\bar{y}$ has expected squared norm
+\begin{multline}
+\label{eq:signal_avg}
+\mathbb{E}[\|\bar{s}\|^2]
+= \frac{\mathbb{E}[\|s\|^2]}{b^2}
+  \Bigl(b + 2\sum_{\tau=1}^{b-1}(b-\tau)\rho(\tau)\Bigr)
+\\
+= \frac{\mathbb{E}[\|s\|^2]}{b}\,\bar{R}_b,
+\end{multline}
+where $\bar{R}_b := 1 + \frac{2}{b}\sum_{\tau=1}^{b-1}(b-\tau)\rho(\tau)$
+is the mean autocorrelation factor, satisfying $1 \le \bar{R}_b \le b$.
+
+\item The noise component of $\bar{y}$ has variance $\sigma^2/b$
+(by independence of $z_1, \ldots, z_b$).
+
+\item The signal-to-noise ratio (SNR) of the block average is
+\begin{equation}
+\label{eq:snr_ratio}
+\mathrm{SNR}(\bar{y})
+= \frac{\mathbb{E}[\|\bar{s}\|^2]}{\sigma^2 / b}
+= \frac{\mathbb{E}[\|s\|^2]}{\sigma^2}\,\bar{R}_b
+= \mathrm{SNR}(y_i) \cdot \bar{R}_b.
+\end{equation}
+In particular, for the AR(1) model $\rho(\tau) = \alpha^{|\tau|}$,
+\begin{equation}
+\label{eq:snr_ar1}
+\bar{R}_b
+= \frac{1 + \alpha}{1 - \alpha}
+  - \frac{2\alpha(1-\alpha^{b})}{b(1-\alpha)^2},
+\end{equation}
+which approaches $(1+\alpha)/(1-\alpha)$ as $b \to \infty$.
+For $\alpha = 0.9$ and $b = 16$, $\bar{R}_b \approx 11.4$:
+averaging $16$ correlated frames amplifies the SNR by a factor
+of $11.4$ relative to a single frame, effectively reducing the
+noise standard deviation by $\sqrt{11.4} \approx 3.4\times$.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+\textbf{Part (i).}
+$\bar{s} = \frac{1}{b}\sum_i s_i$, so
+\[
+\mathbb{E}[\|\bar{s}\|^2]
+= \frac{1}{b^2}\sum_{i,j}\mathbb{E}[s_i^\top s_j]
+= \frac{\mathbb{E}[\|s\|^2]}{b^2}\sum_{i,j}\rho(|i-j|).
+\]
+Writing $\sum_{i,j}\rho(|i-j|) = b + 2\sum_{\tau=1}^{b-1}(b-\tau)\rho(\tau)$
+gives~\eqref{eq:signal_avg}.  The bounds $1 \le \bar{R}_b \le b$ follow
+from $0 \le \rho(\tau) \le 1$.
+
+\textbf{Part (ii).}
+$\bar{z} = \frac{1}{b}\sum_i z_i$ with $z_i$ i.i.d.\
+$\mathcal{N}(0, \sigma^2 I_d)$, so
+$\mathrm{Var}(\bar{z}) = \sigma^2/b$.
+
+\textbf{Part (iii).}
+Division of~(i) by~(ii) gives~\eqref{eq:snr_ratio}.
+For AR(1), $\sum_{\tau=1}^{b-1}(b-\tau)\alpha^\tau
+= b\,\frac{\alpha}{1-\alpha} - \frac{\alpha(1-\alpha^{b})}{(1-\alpha)^2}$,
+and substitution yields~\eqref{eq:snr_ar1}.
+\end{proof}
+
+\paragraph{Implications for mechanism design.}
+Theorem~\ref{thm:noise_averaging} quantifies a fundamental
+limitation of independent noise injection for temporally
+correlated data.  Any aggregation operation---whether by the
+downstream classifier (e.g., temporal attention in a
+Transformer) or by the adversary (e.g., averaging obfuscated
+frames to denoise them)---amplifies the signal relative to the
+noise by the factor $\bar{R}_b$, which can be large when the
+autocorrelation decays slowly.  To maintain the intended
+privacy guarantee under aggregation, the mechanism must inflate
+$\sigma$ by a factor of $\sqrt{\bar{R}_b}$ beyond what the
+frame-level MI bound prescribes, or adopt correlated noise
+injection as discussed below.
+
+\subsection{Correlated Noise Injection}
+
+A natural defense against the averaging vulnerability of
+Theorem~\ref{thm:noise_averaging} is to inject noise whose
+temporal correlation matches that of the signal.  This ensures
+that any linear aggregation suppresses signal and noise equally.
+
+\begin{theorem}[Privacy-preserving correlated noise]
+\label{thm:correlated_noise}
+Consider the mechanism $\mathcal{M}(X) = XW + B$ where $B$ has
+row covariance $\Sigma_B \in \mathbb{R}^{n \times n}$ (not
+necessarily diagonal).  If $\Sigma_B = \sigma^2 R$ (noise
+correlation matches data correlation), then:
+
+\begin{enumerate}[label=(\roman*)]
+\item The signal-to-noise ratio of the block average $\bar{y}$
+satisfies $\mathrm{SNR}(\bar{y}) = \mathrm{SNR}(y_i)$ for all
+block sizes $b$: temporal aggregation does not amplify the SNR.
+
+\item The Type-(II) MI bound of
+Corollary~\ref{cor:thm2_isotropic} generalizes to
+\begin{align}
+\label{eq:mi_correlated_noise}
+&\MI(X; XW{+}B) \le
+\tfrac{d}{2}\bigl[
+\log\det\bigl(\mathbb{E}_X\bigl[
+I_n {+} \sigma^{-2}R^{-1}\Sigma_X
+\bigr]\bigr) \notag \\
+&\;{}- \mathbb{E}_X\bigl[
+\log\det\bigl(
+I_n {+} \sigma^{-2}R^{-1}\Sigma_X
+\bigr)
+\bigr]
+\bigr].
+\end{align}
+
+\item Under Assumption~\ref{asm:gaussian}, the bound~\eqref{eq:mi_correlated_noise} evaluates to
+\begin{equation}
+\label{eq:mi_corr_noise_gauss}
+\MI \;\le\; \frac{1}{2}\sum_{i=1}^n \sum_{j=1}^d \mathbb{E}_W\!\left[
+\log\!\left(1 + \sigma^{-2}\lambda_j(W^\top\!\Sigma_0 W)\right)
+\right],
+\end{equation}
+which is identical to the i.i.d.\ isotropic-noise bound
+$I_{I_n}(\sigma)$: the correlation effects cancel exactly.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+\textbf{Part (i).}
+With $B$ having row covariance $\sigma^2 R$, the noise within a
+block of $b$ frames has covariance
+$\sigma^2 T_b$ (the same Toeplitz structure as the signal).
+The block-averaged noise has variance
+$\sigma^2 \bar{R}_b / b$, while the signal has expected squared
+norm $\mathbb{E}[\|s\|^2]\bar{R}_b/b$ by~\eqref{eq:signal_avg}.
+Their ratio is $\mathbb{E}[\|s\|^2]/\sigma^2 = \mathrm{SNR}(y_i)$,
+independent of $b$.
+
+\textbf{Part (ii).}
+Theorem~\ref{thm:mi_masking} with $\Sigma_B = \sigma^2 R$
+gives the bound with $\Sigma_B^{-1} = \sigma^{-2}R^{-1}$.
+
+\textbf{Part (iii).}
+Under Assumption~\ref{asm:gaussian},
+$\mathbb{E}[\Sigma_X] = \mathrm{tr}(\Sigma_0) \cdot R$ (up
+to centering), so
+$R^{-1}\mathbb{E}[\Sigma_X] = \mathrm{tr}(\Sigma_0)\,I_n$.
+The Kronecker factorization used in the proof of
+Theorem~\ref{thm:mi_correlation} yields the MI through the
+channel $R^{-1/2}XW + R^{-1/2}B'$, where $R^{-1/2}X$ has
+i.i.d.\ rows (by the whitening property) and $R^{-1/2}B'$ has
+i.i.d.\ $\mathcal{N}(0,\sigma^2)$ rows.  The resulting MI is
+the i.i.d.\ expression~\eqref{eq:mi_corr_noise_gauss}.
+\end{proof}
+
+\paragraph{Interpretation.}
+Theorem~\ref{thm:correlated_noise} shows that matching the noise
+correlation to the data correlation eliminates both the MI
+distortion from Theorem~\ref{thm:mi_correlation} and the averaging
+vulnerability from Theorem~\ref{thm:noise_averaging}.
+The mechanism with $\Sigma_B = \sigma^2 R$ achieves the same
+MI bound as an i.i.d.\ mechanism with isotropic noise at the same
+$\sigma$, while also being immune to temporal aggregation attacks.
+In practice, implementing correlated noise injection requires the data
+owner to estimate the autocorrelation function $\rho(\cdot)$ and
+generate noise from the corresponding multivariate Gaussian
+distribution---a modest computational overhead given that a Toeplitz
+correlation matrix admits $O(n \log n)$ sampling via the circulant
+embedding method.  We evaluate a clip-correlated instance of this
+mechanism in Section~\ref{subsec:corr_empirical}, confirming that it
+reduces the aggregation adversary's success while leaving the
+frame-independent adversary unaffected, exactly as parts~(i)--(iii)
+predict.
+
+\subsection{Empirical Autocorrelation of Frame Embeddings}
+\label{subsec:autocorr}
+
+To ground the preceding analysis, we measure the temporal
+autocorrelation of ResNet-18 embeddings on UCF-101.  For each
+clip with frame embeddings
+$z_0, z_1, \ldots, z_{L-1} \in \mathbb{R}^{d_0}$, we compute
+the average cosine similarity at lag~$\tau$:
+\[
+\rho_{\mathrm{clip}}(\tau)
+= \frac{1}{L-\tau}\sum_{t=0}^{L-\tau-1}
+  \frac{z_t^\top z_{t+\tau}}{\|z_t\|\,\|z_{t+\tau}\|},
+\]
+and average over $200$ retained clips (first $L=100$ frames each) to obtain $\rho(\tau)$.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.85\linewidth]{fig_embedding_autocorr.pdf}
+\caption{Measured temporal autocorrelation $\rho(\tau)$ of ResNet-18
+frame embeddings on UCF-101 (mean over $200$ clips, shaded $\pm$SE),
+with the fitted AR(1) law. The slow decay confirms the correlation
+model of Definition~\ref{def:temporal_correlation}.}
+\label{fig:autocorrelation}
+\end{figure}
+
+The embeddings are strongly and slowly-decaying correlated
+(Figure~\ref{fig:autocorrelation}): we find $\rho(1) \approx 0.78$,
+decaying to $\rho(10) \approx 0.21$ and crossing zero near
+$\tau \approx 20$. Fitting an AR(1) model $\rho(\tau) \approx \alpha^\tau$
+gives $\alpha \approx 0.84$, confirming that the AR(1) instantiation used
+throughout this section is an accurate model of real frame embeddings
+rather than a mathematical convenience. Substituting the measured $\rho$
+into the aggregation factor of Theorem~\ref{thm:noise_averaging},
+$\bar{R}_b = 1 + \frac{2}{b}\sum_{\tau=1}^{b-1}(b-\tau)\rho(\tau)$, yields
+$\bar{R}_{16} \approx 7.4$ for a $b=16$-frame clip: averaging $16$ frames
+amplifies the signal-to-noise ratio by that factor, so independent
+per-frame noise is effectively reduced by
+$\sqrt{\bar{R}_{16}} \approx 2.7\times$ under temporal aggregation. This
+is a real-embedding instance of exactly the degradation
+Theorem~\ref{thm:noise_averaging} predicts, and it quantifies the noise
+inflation a deployment must apply---or the correlated-noise mechanism of
+Theorem~\ref{thm:correlated_noise} it must adopt---to remain private
+against an adversary that aggregates across frames.
+
+\subsection{Empirical Validation: Aggregation Attack and Correlated Noise}
+\label{subsec:corr_empirical}
+
+The preceding subsections establish that the correlation
+Theorems~\ref{thm:mi_correlation}--\ref{thm:correlated_noise} assume is
+present in real embeddings. We now instantiate the aggregation adversary
+of Theorem~\ref{thm:noise_averaging} and the correlated-noise defense of
+Theorem~\ref{thm:correlated_noise} directly, both on UCF-101 and on a
+controlled synthetic model that dials the correlation.
+
+\paragraph{The aggregation adversary (Theorem~\ref{thm:noise_averaging}).}
+Theorem~\ref{thm:noise_averaging} shows that pooling evidence across
+correlated frames cancels independent noise. We realize such an adversary
+and compare it to the frame-independent attack the mechanism is calibrated
+against. Both use the same per-frame likelihood-ratio scores
+(LiRA;~\citealp{carlini2022firstprinciples}) on the released output and
+differ only in the decision rule: the \emph{blind} adversary ranks all
+candidate rows individually and emits the top-$T$ (the i.i.d.\ attack the
+calibration assumes), while the \emph{correlation-aware} adversary
+aggregates the per-frame scores within each clip
+($s_c = \sum_{r \in c} \ell_r$), identifies the highest-scoring clip, and
+emits its top-$T$ frames---the empirical form of the temporal aggregation
+in Theorem~\ref{thm:noise_averaging}. On UCF-101
+(Table~\ref{tab:aggregation}), the correlation-aware adversary identifies
+the source clip well above chance---top-$1$ accuracy $0.47$--$0.57$ out of
+$400$ candidate clips against a $1/400$ random baseline---and improves the
+weighted recovery over the blind attack at three of the four noise levels.
+The gain is modest on real data because the random per-clip frame sampling
+of Section~\ref{subsec:exp_setup} scatters the $T=16$ members across the
+$L=100$-frame clip, so the aggregation of
+Theorem~\ref{thm:noise_averaging} acts on a weakened intra-clip
+correlation; we isolate the full effect synthetically below.
+
+\begin{table}[t]
+\centering\small
+\caption{Blind vs.\ correlation-aware (Theorem~\ref{thm:noise_averaging}
+aggregation) attack on UCF-101, half-integer weighted recovery, and the
+correlation-aware source-clip top-1 out of $400$ candidate clips
+($1/400 = 0.0025$ chance). Mean over $60$ ($15$ targets $\times$ $4$
+trials).}
+\label{tab:aggregation}
+\begin{tabular}{cccc}
+\toprule
+$\sigma$ & Blind (half) & Aware (half) & Aware clip top-1 \\
+\midrule
+$0.05$ & $0.552$ & $0.573$ & $0.573$ \\
+$0.10$ & $0.446$ & $0.467$ & $0.467$ \\
+$0.25$ & $0.483$ & $0.480$ & $0.480$ \\
+$0.50$ & $0.493$ & $0.533$ & $0.533$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Controlled study and correlated-noise defense (Theorem~\ref{thm:correlated_noise}).}
+To isolate the effect the real-data sampling mutes, we generate synthetic
+clips whose intra-clip correlation is a single dial $\rho \in [0,1)$: each
+clip is an AR(1) sequence with
+$\mathrm{Corr}(\text{frame}_s, \text{frame}_t) = \rho^{|s-t|}$, matching
+Definition~\ref{def:temporal_correlation}, and we pass them through the
+same mechanism and scoring (Figure~\ref{fig:synthetic}). Three effects
+emerge, each matching the theory. First, \emph{graded leakage is real}:
+the likelihood-ratio score of a non-member frame rises as its temporal
+distance to the nearest member shrinks, with reach growing in $\rho$; at
+$\rho{=}0$ only members score above baseline, so the partial credit the
+weighted formulation assigns tracks measurable leakage. Second, the
+aggregation attack's source-clip identification rises from $0.75$ at
+$\rho{=}0$ to $1.00$ at $\rho \ge 0.9$ while the blind adversary lags
+($0.05 \to 0.87$): the correlation the calibration treats as absent is
+exactly what the aggregation exploits, confirming
+Theorem~\ref{thm:noise_averaging}. Third, and validating
+Theorem~\ref{thm:correlated_noise}, at matched noise budget and
+$\rho{=}0.8$ we vary the fraction $f$ of the per-frame noise that is
+shared within a clip; moving from independent noise ($f{=}0$) to fully
+clip-correlated noise ($f{=}1$) reduces the aggregation attack's success
+from $0.29$ to $0.17$ while leaving the blind adversary unchanged---the
+shared component sums coherently under the adversary's pooling and cannot
+be averaged out, exactly as Theorem~\ref{thm:correlated_noise} predicts.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig_synthetic_correlation.pdf}
+\caption{Controlled-correlation study on synthetic AR(1) clips. Left:
+graded leakage---likelihood-ratio score vs.\ temporal distance to the
+nearest member, flat at $\rho{=}0$ and reaching farther as $\rho$ grows.
+Middle: the aggregation attack of Theorem~\ref{thm:noise_averaging}
+defeats a noise level that blinds the i.i.d.\ adversary, with the
+advantage growing in $\rho$. Right: at matched budget, the clip-correlated
+noise of Theorem~\ref{thm:correlated_noise} defends the aggregation
+adversary better than i.i.d.\ noise.}
+\label{fig:synthetic}
+\end{figure}
+
+Together, these experiments turn Section~\ref{sec:correlation_analysis}
+from prediction into measurement: the correlation the theory assumes is
+present and slowly-decaying in real embeddings
+(\S\ref{subsec:autocorr}), the aggregation vulnerability of
+Theorem~\ref{thm:noise_averaging} is realized by a concrete attack, and
+the correlated-noise remedy of Theorem~\ref{thm:correlated_noise}
+measurably closes it.
+%% =================================================================
+%% REVISED CONCLUSION
+%% Addresses: incorporates new contributions (correlation analysis,
+%%   binary comparison, reframed scope)
+%% =================================================================
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This work extends the formal learnable obfuscation framework of~\cite{xiao2024formal} to structured data universes through \emph{weighted membership inference}, in which adversarial success is graded by semantic and temporal proximity rather than exact frame recovery. We clearly separate two dimensions of the video privacy problem: the similarity structure of the data universe (addressed through the weighted scoring rule) and statistical dependence among sampled frames (addressed through the Gram matrix correlation analysis of Section~\ref{sec:correlation_analysis}).
+
+We derived closed-form multivariate hypergeometric expressions for the adversary's prior success probability under half-integer and general $1/m$-resolution weights (Lemmas~3 and~4) and showed that these priors strictly dominate their integer-weight counterpart. We then obtained noise calibration conditions (Theorems~\ref{thm:half_int_calibration} and~\ref{thm:general_m_calibration}) quantifying the additional noise required to preserve a target privacy guarantee under weighted proximity, with the mixing and permutation amplification bounds of~\cite{xiao2024formal} transferring directly to the weighted setting.
+
+The UCF-101 evaluation instantiates these results empirically at multiple operating points. On the universe of Lemma~3's visualization, the prior-cost gap $C_{\mathrm{half}} \approx 31 \cdot C_{\mathrm{int}}$ translates through Theorem~\ref{thm:mi_masking} into a noise inflation of roughly $5.6\times$ relative to the integer rule; the magnitude is set by the universe's weight-class layout and may differ in a target deployment. The correlation analysis of Section~\ref{sec:correlation_analysis} reveals a nuanced interplay: Theorem~\ref{thm:mi_correlation} shows that temporal correlation \emph{reduces} the mutual information between the dataset and the mechanism's output, while Theorem~\ref{thm:prior_block} shows that block-correlated sampling produces a prior-cost constant intermediate between the integer and scattered-frame baselines.  Theorem~\ref{thm:combined_calibration} gives the combined noise calibration requirement under joint correlation and weighted scoring, and Theorem~\ref{thm:noise_averaging} quantifies a separate vulnerability: independent noise injection allows temporal aggregation to amplify the signal-to-noise ratio by the autocorrelation factor $\bar{R}_b$, which can be large for slowly decorrelating video.  Theorem~\ref{thm:correlated_noise} shows that matching the noise correlation to the data correlation eliminates this vulnerability entirely.  We do not estimate $\MI(X; \mathcal{M}(X))$ directly and therefore do not numerically certify the bound, and Attack~2 is evaluated over a $2{,}016$-row subsample of the candidate universe for tractability---an adversary-friendly choice under which the mechanism still does not collapse. The downstream classifier preserves utility within the noise envelope $\sigma \le 0.10$.
+
+Several directions remain open. First, extending the weighted formulation beyond frame-level similarity to richer temporal and semantic structures---event-level or trajectory-level notions of proximity---would further align the privacy model with realistic threat scenarios in video analytics. Second, while Section~\ref{subsec:corr_empirical} validates the correlated-noise mechanism of Theorem~\ref{thm:correlated_noise} against the aggregation adversary, a full downstream evaluation---quantifying the privacy--utility tradeoff of clip-correlated noise on the UCF-101 classifier and connecting it to the Pufferfish privacy framework~\cite{kifer2014pufferfish,song2017pufferfish}---remains open. Third, a direct empirical estimate of $\MI(X; \mathcal{M}(X))$, together with a comparison to the upper bounds of Theorem~\ref{thm:mi_masking}, would tighten the link between the theoretical and empirical analyses and would also clarify how much of the operable noise envelope the calibration-required inflation actually consumes for a given deployment. Finally, the empirical evaluation is single-seed and uses a fixed classifier architecture; multi-seed variance estimation, stronger adversarial strategies, and alternative temporally coherent benchmarks would sharpen the empirical picture.
+%%
+%% The next two lines define the bibliography style to be used, and
+%% the bibliography file.
+
+\appendix
+
+\section{Supplementary Experimental Results}
+\label{app:supplementary}
+
+This appendix supplements the operating-point results of Section~\ref{subsec:mia_operating_point} with the full noise sweep and a closed-form analysis of mixing intensity. None of the material here is required for the paper's central claims; we include it for completeness and as sanity checks.
+
+\subsection{Full $(k, \sigma)$ sweep}
+\label{app:sigma_sweep}
+
+Table~\ref{tab:sigma_sweep} reports the two temporal membership inference scores across $k \in \{0, 1, 5\}$ and $\sigma \in \{0, 0.01, 0.05, 0.10, 0.50\}$, plus two $\sigma$-extension cells at $k = 5$ and $\sigma \in \{2.00, 5.00\}$. Section~\ref{subsec:utility} identifies $\sigma \le 0.10$ as the mechanism's operable noise range on the downstream task; $\sigma = 0.50$ reduces utility to chance level, and the $\sigma$-extension cells lie far beyond any utility-preserving regime.
+
+\begin{table}[!htbp]
+\centering\small
+\caption{Empirical temporal membership inference scores across the full $(k, \sigma)$ sweep.}
+\label{tab:sigma_sweep}
+\begin{tabular}{rrrr}
+\toprule
+$k$ & $\sigma$ & Attack~1 & Attack~2 \\
+\midrule
+$0$ & $0.00$ & $0.460\,(0.019)$  & $0.835\,(0.039)$ \\
+$0$ & $0.01$ & $0.460\,(0.019)$ & $0.835\,(0.039)$ \\
+$0$ & $0.05$ & $0.441\,(0.017)$ & $0.751\,(0.049)$ \\
+$0$ & $0.10$ & $0.484\,(0.018)$ & $0.715\,(0.036)$ \\
+$0$ & $0.50$ & $0.489\,(0.016)$ & $0.710\,(0.051)$ \\
+\midrule
+$1$ & $0.00$ & $0.403\,(0.021)$ & $0.565\,(0.060)$ \\
+$1$ & $0.01$ & $0.403\,(0.021)$  & $0.565\,(0.060)$ \\
+$1$ & $0.05$ & $0.509\,(0.013)$ & $0.658\,(0.055)$ \\
+$1$ & $0.10$ & $0.454\,(0.020)$ & $0.439\,(0.050)$ \\
+$1$ & $0.50$ & $0.408\,(0.015)$ & $0.425\,(0.061)$ \\
+\midrule
+$5$ & $0.00$ & $0.436\,(0.019)$ & $0.797\,(0.045)$ \\
+$5$ & $0.01$ & $0.439\,(0.019)$ & $0.796\,(0.045)$ \\
+$5$ & $0.05$ & $0.469\,(0.018)$ & $0.715\,(0.052)$ \\
+$5$ & $0.10$ & $0.482\,(0.019)$ & $0.648\,(0.042)$ \\
+$5$ & $0.50$ & $0.445\,(0.018)$ & $0.643\,(0.056)$ \\
+$5$ & $2.00$ & $0.376\,(0.017)$ & $0.423\,(0.058)$ \\
+$5$ & $5.00$ & $0.404\,(0.017)$  & $0.214\,(0.047)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each cell is averaged over $n_{\mathrm{targets}} = 10$ targets with $n_{\mathrm{trials}} = 5$ Monte Carlo trials ($50$ samples); standard errors $\mathrm{std}/\sqrt{50}$ are shown in parentheses.
+
+\subsection{Frame-survival closed-form analysis}
+\label{app:frame_survival}
+
+For mixing intensity $k \ge 1$ and $n_0$ samples per class, each target clip appears in expectation $\mathbb{E}[\text{appearances}] = 2ck/n_0$ class-pair mixed samples, each carrying signal weight $1/(2k)$ from the $k$-fold averaging. The expected total signal mass is therefore
+\[
+\mathbb{E}[\text{appearances}] \cdot \tfrac{1}{2k} \;=\; \frac{c}{n_0},
+\]
+\emph{independent of $k$ for $k \ge 1$}. With $c = 101$ and $n_0 = 50$, this gives $c/n_0 = 2.02$ across all $k \ge 1$ (Table~\ref{tab:frame_survival}).
+
+\begin{table}[!htbp]
+\centering\small
+\caption{Closed-form signal mass under class-$k$ mixing.}
+\label{tab:frame_survival}
+\begin{tabular}{rrcr}
+\toprule
+$k$ & $\mathbb{E}[\text{appearances}]$ & weight & signal mass \\
+\midrule
+$0$  & $1.00$  & $1$    & $1.00$ \\
+$1$  & $4.04$  & $1/2$  & $2.02$ \\
+$2$  & $8.08$  & $1/4$  & $2.02$ \\
+$3$  & $12.12$ & $1/6$  & $2.02$ \\
+$5$  & $20.20$ & $1/10$ & $2.02$ \\
+$10$ & $40.40$ & $1/20$ & $2.02$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A first-moment argument therefore predicts no variation in attack difficulty as $k$ varies among $k \ge 1$: each target's total signal is preserved in aggregate.
+
+\section{Open Science}
+\label{app:open_science}
+
+All artifacts required to reproduce the results of this paper are available at the following anonymous repository:
+\begin{center}
+\url{https://anonymous.4open.science/r/security-ml-A066/}
+\end{center}
+
+The repository contains: (i) code implementing the obfuscation mechanism and its temporal membership inference variant, the likelihood-ratio attack, and the Transformer-based downstream classifier; (ii) end-to-end scripts for frame extraction, ResNet-18 embedding, obfuscated training, and evaluation; and (iii) code to reproduce the calibration figures and tables. The UCF-101 dataset~\cite{soomro2012ucf101} is publicly available and not redistributed.
+
+\section{Ethical Considerations}
+\label{app:ethics}
+
+This work studies privacy-preserving mechanisms for outsourced video machine learning. All experiments are conducted on UCF-101~\cite{soomro2012ucf101}, a publicly distributed action recognition benchmark. No human subjects were recruited, no new data were collected, and no personally identifying attributes are labeled or used. The temporal membership inference attack is used as a privacy-evaluation tool against our own mechanism rather than against any deployed system. All experiments were conducted on a single workstation (Intel Core i9-14900KF, NVIDIA GeForce RTX 4070) with total compute under 100~GPU-hours.
+
+\bibliography{references}
+
+\end{document}
