@@ -86,17 +86,14 @@ al.~\cite{xiao2024formal}, we prove that the mixing and permutation
 amplification bounds transfer directly to the weighted setting, and
 derive noise calibration conditions for Gaussian masking mechanisms
 under arbitrary weight resolution.  We further analyze the effect of
-temporal correlation among frame embeddings, showing that while
-correlation \emph{reduces} the mutual-information bound (favoring
-privacy on that axis), it enables a temporal-aggregation attack that
-averages away independent noise---a vulnerability we prove is eliminated
-by matching the noise correlation to the data correlation.  Experiments
-on UCF-101 numerically evaluate the predicted noise inflation, report
-empirical attack scores against closed-form chance baselines at multiple
-operating points under both weighted and binary scoring, measure the
-real frame-embedding autocorrelation ($\alpha \approx 0.84$) that drives
-the aggregation attack, and measure downstream classifier accuracy across
-the noise sweep.
+temporal correlation among frame embeddings on the mutual information
+bounds, showing that correlation inflates the Gram matrix eigenvalues
+and weakens privacy guarantees relative to the i.i.d.\ baseline.
+Experiments on UCF-101 numerically evaluate the predicted noise
+inflation, report empirical attack scores against closed-form chance
+baselines at multiple operating points, compare weighted and binary
+scoring, and measure downstream classifier accuracy across the noise
+sweep.
 \end{abstract}
 
 \section{Introduction}
@@ -142,7 +139,7 @@ This work makes the following contributions:
     \item We formalize \emph{weighted membership inference} for structured data universes, in which adversarial success is graded by similarity rather than exact recovery. We clearly separate this from the orthogonal question of statistical dependence in sampling, which we analyze separately.
     \item We derive closed-form prior success probabilities under discretized similarity weights ($1/m$ resolution) and show that these strictly exceed the integer-weight baseline. On a representative universe, the prior-cost constant inflates by $31{\times}$ at half-integer resolution.
     \item We extend the state-of-the-art mutual-information-based privacy framework~\cite{xiao2024formal} to weighted inference and derive explicit noise calibration conditions. We show that the mixing and permutation amplification bounds of the prior work~\cite{xiao2024formal} transfer directly to the weighted setting.
-    \item We analyze the effect of temporal correlation among frame embeddings, proving that correlation reduces the mutual-information bound but enables a temporal-aggregation attack that averages away independent noise, and that matching the noise correlation to the data correlation eliminates this vulnerability at no extra noise budget.
+    \item We analyze the effect of temporal correlation among frame embeddings, showing that the induced inflation of the correlation-matrix eigenvalues---while it lowers the mutual-information upper bound---enables a temporal-aggregation attack that averages away independent noise and thereby weakens realized privacy, and that matching the noise correlation to the data correlation eliminates this vulnerability at no extra noise budget.
     \item We empirically evaluate the privacy--utility tradeoff on UCF-101, reporting both weighted and binary attack scores at multiple operating points, measuring the real frame-embedding autocorrelation, and instantiating the aggregation attack and correlated-noise defense that validate the correlation analysis.
 \end{itemize}
 
@@ -1249,22 +1246,21 @@ positivity of $\lambda_j$ with probability one.
 \end{proof}
 
 \paragraph{Interpretation.}
-Theorem~\ref{thm:mi_correlation} shows that temporal correlation
-\emph{reduces} the mutual-information bound between the dataset and
-the mechanism's output: correlated rows carry less total information
-than independent rows, which favors privacy. The adversary's success
-bound from~\eqref{eq:success_bound_recall} depends on the \emph{product}
-$\mathrm{MI} \cdot C$, so it is worth asking whether the prior-cost
-constant $C$ moves against this. It does not: the increase in $C$ over
-the integer baseline is caused by \emph{weighted scoring}, not by
-correlation, and Theorem~\ref{thm:prior_block} shows that block-correlated
-sampling in fact \emph{lowers} $C$ relative to the scattered
-half-integer case. Correlation is therefore privacy-favorable on both
-factors of the bound. The residual danger it introduces is not in this
-static bound at all, but in the \emph{aggregation} vulnerability of
-Theorem~\ref{thm:noise_averaging}: a model or adversary that averages
-across correlated frames can cancel independent noise, which we
-address next.
+Temporal correlation spreads---inflates---the eigenvalues of the sample
+correlation matrix $R$ while preserving their sum ($\mathrm{tr}(R) = n$),
+and by the concavity of $\log$ this \emph{lowers} the mutual-information
+\emph{upper bound} (Theorem~\ref{thm:mi_correlation}). This does not mean
+the mechanism becomes more private under correlation: the static bound
+$(\mathrm{MI} + \mathrm{const}) \cdot C$ is not the operative quantity.
+The very eigenvalue inflation that lowers the bound is what lets a model
+or adversary \emph{average} across correlated frames and cancel the
+independent noise, weakening the \emph{realized} privacy---the
+aggregation vulnerability that Theorem~\ref{thm:noise_averaging} makes
+precise and Theorem~\ref{thm:correlated_noise} repairs. (The prior-cost
+constant $C$ does not move against privacy either: its increase over the
+integer baseline is caused by \emph{weighted scoring}, not correlation,
+and block-correlated sampling in fact \emph{lowers} $C$ relative to the
+scattered half-integer case by Theorem~\ref{thm:prior_block}.)
 
 \subsection{Adversary Success under Combined Correlation and Weighted Scoring}
 

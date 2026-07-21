@@ -18,8 +18,8 @@ unchanged from the merged base you pasted.
 
 | Section | Status | What it is / what I changed |
 |---|---|---|
-| **Abstract** | **[EDIT]** | Fixed a real contradiction: it claimed correlation "inflates Gram eigenvalues and **weakens** privacy," but Thm 11 proves correlation *reduces* MI. Rewrote to the accurate story: correlation reduces MI **but** enables an aggregation attack, fixed by correlated noise. Added the measured `α≈0.84`. |
-| **1 Introduction** | **[EDIT]** | Same fix in the contribution bullet on correlation. Rest kept (quantitative preview 31×/5.6×, weighted-scoring intuition, "why theoretical bounds"). |
+| **Abstract** | **[KEEP — reverted to submitted]** | The abstract is **locked** (already submitted), so it is unchanged from what you submitted, including the sentence "correlation inflates the Gram matrix eigenvalues and weakens privacy guarantees." That sentence is imprecise vs Thm 11 (which lowers the MI *bound*), so I **reconciled the body** to it instead (see §7 interpretation): the eigenvalue inflation lowers the MI bound **but** enables the aggregation attack that weakens *realized* privacy — which makes "weakens privacy" true via aggregation. No body statement now contradicts the abstract. |
+| **1 Introduction** | **[EDIT]** | Reframed the correlation contribution bullet to match the locked abstract's "eigenvalue inflation / weakens privacy" language while staying precise (inflation lowers the MI bound but enables the aggregation attack). Rest kept. |
 | **2 Related Work** | **[KEEP]** | Includes the new §2.5 "DP for Temporally Correlated Data" (Cao, Pufferfish, Song, Bozkir) — addresses **B3**. |
 | **3 Preliminary** | **[KEEP]** | Self-contained recap of [50] (**B1**), "Role of uniform sampling" (**B4**), "Weight selection" (**B5**), "Role of σ" (**B6**), Algorithm 1 & 2 boxes (**B6**). |
 | **4 Main Results** | **[KEEP]** | Lemma 2 (hardness) + Lemmas 3–4 (half-integer, 1/m priors). |
@@ -64,13 +64,17 @@ plus the existing `fig1_prior_success.pdf`, `figure5_visual_obfuscation_pixel.pd
 
 ## Key decisions / fixes you should know about
 
-1. **Abstract/intro correction (important).** The merged draft's abstract said
-   correlation "weakens privacy," but the advisor's own Theorem 11 proves
-   correlation *reduces* MI (helps privacy on that axis). A reviewer would catch
-   this. I rewrote abstract + intro + conclusion to the accurate net story:
-   correlation reduces MI, **but** the aggregation attack (Thm 15) is the real
-   danger, eliminated by correlated noise (Thm 16). **Please sanity-check you're
-   happy with this framing.**
+1. **Abstract is locked → reconciled the body to it (important).** The submitted
+   abstract says correlation "inflates the Gram matrix eigenvalues and weakens
+   privacy." Taken literally against Theorem 11 (which *lowers* the MI bound)
+   that is imprecise, and a reviewer could flag an abstract-vs-theorem clash.
+   Since the abstract can't change, I left it exactly as submitted and instead
+   made the **body** consistent with it: the §7 interpretation now says the
+   eigenvalue inflation lowers the MI *bound* but is precisely what enables the
+   aggregation attack that weakens *realized* privacy (Thm 15), repaired by
+   correlated noise (Thm 16). So "weakens privacy" is true via aggregation, and
+   nothing in the body contradicts the abstract. **Please sanity-check this
+   framing reads well to you.**
 
 2. **Table consistency.** Table 2 and Appendix Table 5 now come from the same
    committed result CSVs (the reproducible artifact). Only one number moved:
