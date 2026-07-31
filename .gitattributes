@@ -1,0 +1,4 @@
+# Keep the code supplement lean: these are repository plumbing, not part of
+# the artifact reviewers receive. `git archive` honours export-ignore.
+.gitignore      export-ignore
+.gitattributes  export-ignore
