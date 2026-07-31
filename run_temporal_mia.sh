@@ -104,9 +104,7 @@ run_mia() {
             > "$log" 2>&1
         echo "  k=$k done."
     done
-    "${PY[@]}" src/merge_results.py \
-        --results-dir "$RESULTS_DIR" \
-        --output ./merged_results.csv
+    "${PY[@]}" src/aggregate.py --mode attacks
 }
 
 run_accuracy() {
@@ -139,39 +137,27 @@ run_accuracy() {
     done
     for pid in "${PIDS[@]}"; do wait "$pid"; done
     echo "All accuracy cells done."
-    "${PY[@]}" src/merge_accuracy.py \
-        --results-dir "$ACC_DIR" \
-        --output ./merged_accuracy.csv
+    "${PY[@]}" src/aggregate.py --mode accuracy
 }
 
 run_plots() {
     echo
-    echo "--- Plots ---"
-    # Refresh both merged CSVs in case results-dir / accuracy_results
-    # changed since the last merge (so fig4 doesn't read stale data).
+    echo "--- Tables and figures ---"
+    # Refresh the merged CSVs in case results-dir / accuracy_results changed
+    # since the last aggregation, then build the privacy-utility frontier
+    # (supplement Table 4 + Figure 6) from them.
     if compgen -G "$RESULTS_DIR/attack_k*_sigma*.csv" > /dev/null; then
-        "${PY[@]}" src/merge_results.py \
-            --results-dir "$RESULTS_DIR" \
-            --output ./merged_results.csv
+        "${PY[@]}" src/aggregate.py --mode attacks
     fi
     if compgen -G "$ACC_DIR/acc_k*_sigma*.csv" > /dev/null; then
-        "${PY[@]}" src/merge_accuracy.py \
-            --results-dir "$ACC_DIR" \
-            --output ./merged_accuracy.csv
+        "${PY[@]}" src/aggregate.py --mode accuracy
     fi
-    "${PY[@]}" src/figure2_mia_robustness.py \
-        --input ./merged_results.csv \
-        --output "$IMG_DIR/fig2_mia_robustness.pdf" || \
-        echo "  [warn] figure2 failed; inspect later"
-    "${PY[@]}" src/figure3_integer_vs_half.py \
-        --input ./merged_results.csv \
-        --output "$IMG_DIR/fig3_int_vs_half.pdf" || \
-        echo "  [warn] figure3 failed (likely arg-shape mismatch); inspect later"
-    "${PY[@]}" src/figure4_pareto.py \
-        --mia ./merged_results.csv \
-        --accuracy ./merged_accuracy.csv \
-        --output "$IMG_DIR/fig4_pareto.pdf" || \
-        echo "  [warn] figure4 failed; inspect later"
+    if compgen -G "$RESULTS_DIR/attack_k*_sigma*.csv" > /dev/null && \
+       compgen -G "$ACC_DIR/acc_k*_sigma*.csv" > /dev/null; then
+        "${PY[@]}" src/aggregate.py --mode pareto
+    fi
+    # Closed-form numerics: main Table 1, main Figure 1, supplement Table 7.
+    "${PY[@]}" src/theory_numerics.py
 }
 
 case "$PHASE" in

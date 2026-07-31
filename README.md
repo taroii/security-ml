@@ -1,63 +1,77 @@
 # Learnable Obfuscation for Temporally Related Video Data
 
-This repo contains the experiments backing our paper on temporal membership-inference attacks (MIA) against learnable obfuscation of video data. The pipeline sweeps the obfuscation knobs `(k, sigma)`, scores three MIA variants on the resulting embeddings, and measures the downstream classifier accuracy gap.
+Code supplement for the paper. The pipeline sweeps the obfuscation knobs
+`(k, sigma)`, scores membership-inference attacks on the resulting embeddings,
+and measures downstream classifier accuracy.
 
-## CCS revision (round-1 response)
+**This repository ships code only.** Every CSV, figure, and table in the paper
+and the technical supplement is produced by running the scripts below, so there
+is exactly one source of truth for each number. Outputs land in `results/`,
+`results_revision/`, `accuracy_results/`, and `images/`, all of which are
+gitignored.
 
-The `revision/` directory and the new scripts below address the CCS 2026-B
-reviews. The central criticism was that the paper motivated itself with
-temporal correlation but modeled it only in the reward, not the sampling.
-The revision adds:
+## Attack naming: code vs. paper
 
-- **`src/two_level_prior.py`** — a two-level clip-then-frame *compound prior*
-  (validated against Monte Carlo and recovering the paper's Lemma 3 at `G=1`),
-  showing clustered membership inflates the adversary's upper-tail success.
-- **`src/correlation_aware_attack.py`** — a clip-aggregated MI attack that pools
-  per-frame evidence, vs. the paper's blind per-frame attack, on UCF-101.
-- **`src/synthetic_correlation.py`** — a controlled AR(1) study (dial `rho`)
-  isolating graded leakage, the aware-vs-blind gap, and correlated noise.
-- **`src/membership_inference.py`** — now supports `--noise-mode {iid,clip}`
-  (correlated per-clip noise; backward compatible, default `iid`).
+The code implements three attacks; the paper reports two of them. **Read this
+table before opening any output CSV** — the column whose name contains
+`attack2` is *not* the paper's Attack 2.
 
-Deliverables: `revision/REVISION_PLAN.md` (comment-by-comment mapping),
-`revision/response_to_reviewers.md`, and `paper/main.tex` (revised paper source;
-see `paper/REVISION_NOTES.md` for how to integrate). New figures:
-`images/fig_two_level_prior.pdf`, `images/fig_synthetic_correlation.pdf`.
+| Paper | CSV column | Description |
+| --- | --- | --- |
+| Attack 1 (index inference), weighted | `attack1_score_window` | exact (clip, index) match = 1; same clip within ±2 indices of a true frame = 0.5 |
+| Attack 1 (index inference), binary | `attack1_score_int` | exact match only |
+| Attack 2 (frame-level membership), weighted | `attack3_score_half` | top-`T` over a subsampled universe pool ∪ the target rows |
+| Attack 2 (frame-level membership), binary | `attack3_score_int` | exact match only |
+| *not reported* | `attack2_top1` | clip-level top-1 over 50 same-class candidate clips |
+| *not reported* | `attack1_score_half` | a **different** scoring rule: same-clip-*any*-index earns 0.5, with no ±2 window |
+
+Two consequences worth stating explicitly:
+
+- At `(k, sigma) = (1, 0.10)` the CSV shows `attack2_top1 = 0.860` next to
+  `attack3_score_half = 0.439`. The paper's "Attack 2 = 0.439" is the latter.
+  `attack2_top1` is a clip-identification diagnostic that the paper does not
+  report.
+- `attack1_score_half` is retained only as the `window = 0` degenerate case of
+  the same scoring function. It is **not** the rule behind any reported number.
+
+Attack 2's weighted and binary scores coincide in every cell
+(`attack3_score_half == attack3_score_int`) because its subsampled pool
+contains only exact target rows, with no near-miss frames to earn partial
+credit — this is the effect explained in the caption of main-paper Table 2.
+
+### Baseline columns
+
+| Column | Meaning |
+| --- | --- |
+| `attack3_baseline_half` | **operational** chance level, `T / \|pool\|` = 16/2016 ≈ `0.0079`. This is the ≈0.008 baseline the paper reports for Attack 2. |
+| `attack3_baseline_universe` | universe-level chance level over all (clip, index) pairs, ≈ `7.3e-05`. Not reported in the paper. |
+| `attack2_baseline` | `1 / n_clip_candidates` = 0.02, for the unreported `attack2_top1`. |
+| `attack2_baseline_universe` | `1 / n_universe_clips` ≈ `1.26e-04`. |
+| `attack1_baseline_window` | closed-form ±2-window chance level, ≈ `0.373`. |
 
 ## Setup
 
-### 1. Create a conda environment
-
 ```
-conda create -n security python=3.11
+conda create -n security python=3.11.14
 conda activate security
+pip install -r requirements.txt
 ```
 
-### 2. Install PyTorch with CUDA
+`requirements.txt` pins the exact versions listed in Appendix E.1 of the
+technical supplement. The reported runs used the PyTorch MPS backend on Apple
+silicon; no CUDA GPU is required. On a CUDA machine, install
+`torch`/`torchvision` from https://pytorch.org/get-started/locally/ first.
 
-Follow https://pytorch.org/get-started/locally/ for the right command for your platform. For example:
-
-```
-pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-```
-
-If you don't have a GPU, install `torch` and `torchvision` normally.
-
-### 3. Install remaining dependencies
-
-```
-pip3 install -r requirements.txt
-```
+UCF-101 is downloaded automatically on first run (`src/main_video.py` and
+`src/membership_inference.py` both call `download_ucf101`), into `data/`.
 
 ## Running the pipeline
-
-The full sweep (membership-inference attacks, downstream classification accuracy sweep, and figures) is driven by a single script:
 
 ```
 bash run_temporal_mia.sh
 ```
 
-The script has four phases — you can run them individually:
+Four phases, individually runnable:
 
 ```
 bash run_temporal_mia.sh smoke      # 1-cell, 2-trial sanity check
@@ -66,47 +80,99 @@ bash run_temporal_mia.sh accuracy   # downstream accuracy sweep
 bash run_temporal_mia.sh plots      # regenerate figures from existing CSVs
 ```
 
-### What each phase produces
+- **`mia`** — runs `src/membership_inference.py` per `k`, sweeping all
+  `SIGMAS`. Per-cell CSVs land in `results/`; `src/aggregate.py` collates them.
+  Backs main-paper Table 2 and supplement Table 6.
+- **`accuracy`** — runs `src/main_video.py` per `(k, sigma)` cell for
+  downstream Transformer accuracy on obfuscated UCF-101. The first cell builds
+  the embedding cache (slow); the rest reuse it. CSVs land in
+  `accuracy_results/`. Backs supplement Table 1.
+- **`plots`** — re-aggregates both sweeps, builds the privacy–utility frontier
+  (supplement Table 4 + Figure 6), and runs the closed-form numerics
+  (main Table 1, main Figure 1, supplement Table 7).
 
-- **`mia`** — runs `src/membership_inference.py` for each `k` in `K_VALUES`, sweeping all `SIGMAS`. Three attacks are scored per cell (Attack 1: half-integer detection on a single clip; Attack 2: same-class clip identification; Attack 3: frame-of-origin identification across the universe). Per-cell CSVs land in `results/`, and `src/merge_results.py` collates them into `merged_results.csv`.
-- **`accuracy`** — runs `src/main_video.py` for each `(k, sigma)` cell to measure downstream Transformer-classifier accuracy on obfuscated UCF-101. The first cell builds the embedding cache (slow); the rest reuse it. Per-cell CSVs land in `accuracy_results/`, merged into `merged_accuracy.csv`.
-- **`plots`** — produces the paper figures into `images/`:
-  - `fig2_mia_robustness.pdf` (Figure 2): MIA scores vs. sigma for each k, all three attacks.
-  - `fig3_int_vs_half.pdf` (Figure 3): integer-only vs. half-integer Attack 1 scores.
-  - `fig4_pareto.pdf` (Figure 4): privacy/utility Pareto frontier (MIA score vs. accuracy gap).
-
-### Standalone figures
-
-Two figures live outside the main sweep:
-
-- **Figure 1** (`fig1_prior_success.pdf`) — analytical plot of prior attacker success vs. obfuscation parameters. Regenerate with:
-  ```
-  python src/figure1_prior_success.py
-  ```
-- **Figure 5** (`figure5_visual_obfuscation_pixel.pdf`) — qualitative pixel-space visualization (Basketball vs. Skiing under `k=5`, `sigma=0.1`). Regenerate with:
-  ```
-  python src/figure5_visual_obfuscation.py
-  ```
+The remaining artifacts are produced by running their script directly; see the
+table below.
 
 ### Compute knobs
 
-The defaults in `run_temporal_mia.sh` are intentionally small for quick iteration. Override via env vars to scale up:
+Override via env vars:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `N_TARGETS` | `10` | MIA targets per `(k, sigma)` cell |
 | `N_TRIALS` | `5` | MC trials per target |
-| `N_CLIP_CANDIDATES` | `50` | Attack 2 same-class candidate pool size |
-| `N_FRAME_CANDIDATES_A3` | `2000` | Attack 3 universe subsample size |
+| `N_CLIP_CANDIDATES` | `50` | clip-level candidate pool size |
+| `N_FRAME_CANDIDATES_A3` | `2000` | frame-level universe subsample size |
 | `K_VALUES` | `"0 1 5"` | space-separated `k` list |
 | `SIGMAS` | `"0.01 0.05 0.10 0.50"` | space-separated sigma list |
 | `ACC_PARALLEL` | `1` | accuracy jobs in parallel |
 | `SKIP_ACCURACY` | unset | skip the accuracy sweep if set |
 | `CONDA_ENV` | `security` | conda env to run python in |
 
-Examples:
-
 ```
 N_TARGETS=50 N_TRIALS=10 bash run_temporal_mia.sh mia
 K_VALUES="0 1" SIGMAS="0.01 0.10" bash run_temporal_mia.sh
 ```
+
+Note that `run_attack` is seeded with `SEED + i` for the *i*-th sigma in
+`--sigmas`, so changing the order of the sigma list changes the target and
+candidate-pool draws.
+
+### Multi-seed accuracy runs
+
+`src/main_video.py --seed S` reseeds every stochastic component of the utility
+pipeline (frame-index sampling, the stratified subset, class-`k` mixing, the
+projection and the additive noise) and tags the output filename with `S` for
+any `S != 42`, so seeds do not overwrite one another:
+
+```
+for s in 42 43 44; do
+  for k in 0 1 5; do
+    for sig in 0.01 0.05 0.10; do
+      python src/main_video.py --k $k --sigma $sig --seed $s
+    done
+  done
+done
+python src/aggregate.py --mode accuracy   # writes merged_accuracy_by_seed.csv
+```
+
+## The ten modules
+
+Every table and figure in the paper and supplement is produced by one of these.
+
+| Module | Produces |
+| --- | --- |
+| `membership_inference.py` | The mechanism and the three attacks. `results/attack_k*_sigma*.csv` — **main Table 2**, **supplement Table 6**. |
+| `main_video.py` | Utility pipeline: embedding extraction, obfuscation, Transformer training. `accuracy_results/*.csv` — **supplement Table 1**. |
+| `theory_numerics.py` | Closed-form prior/calibration numerics, no dataset needed. **main Table 1** + `images/table_calibration.tex`, **main Figure 1**, **supplement Table 7**. `--mode {calibration,prior-figure,frame-survival}`. |
+| `mi_bound_evaluation.py` | Log-determinant functional on real embeddings. **supplement Table 2 + Figure 2**. |
+| `lira_roc.py` | LiRA ROC / TPR at low FPR. **supplement Table 3 + Figure 3**. Modes `run` \| `plot` \| `verify`. |
+| `correlation_aware_attack.py` | Blind vs. correlation-aware adversary. **supplement Table 5**. |
+| `synthetic_correlation.py` | Controlled AR(1) study. **supplement Figure 4**. Needs no dataset. |
+| `embedding_autocorrelation.py` | ρ(τ) on real frame embeddings. **supplement §E.6 + Figure 1**. |
+| `visual_obfuscation.py` | Pixel-space visualization of the mechanism. **supplement Figure 5**. |
+| `aggregate.py` | Collates per-cell CSVs and joins them into the privacy–utility frontier. `merged_results.csv`, `merged_accuracy.csv`, **supplement Table 4 + Figure 6**. `--mode {attacks,accuracy,pareto}`. |
+
+Only `membership_inference.py` and `main_video.py` require UCF-101;
+`theory_numerics.py` and `synthetic_correlation.py` need no data at all, and
+the rest read artifacts the first two produce.
+
+### Re-rendering without recomputing
+
+```
+python src/mi_bound_evaluation.py --replot-only   # Figure 2 from the CSV
+python src/lira_roc.py plot                       # Figure 3 from saved curves
+python src/aggregate.py --mode pareto             # Table 4 + Figure 6 from CSVs
+```
+
+### Checking results
+
+```
+python src/lira_roc.py verify
+```
+
+Sanity-checks the ROC output: AUCs in range and consistent between the pooled
+and per-query estimators, AUC non-increasing in σ, the hardness ordering
+(informed ≤ same-class ≤ cross-class) intact, TPR@0.1% ≤ TPR@1%, and ROC curves
+monotone from 0 to 1. Exits non-zero on a hard failure.

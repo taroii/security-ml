@@ -234,8 +234,8 @@ def precompute_trial(
                 per-row variance is sigma^2 for ANY f (fair comparison to
                 "iid" at matched noise budget), but same-clip rows now share
                 a common noise component. This is the natural defence for
-                models that jointly process a clip's frames -- the setting
-                Reviewer A flagged as unaddressed. Only defined for k=0
+                models that jointly process a clip's frames, and is the
+                mechanism of Theorem S8 (Appendix B.5). Only defined for k=0
                 (where each mechanism row is exactly one frame, so "clip"
                 is well-posed); requires clip_ids.
     """
@@ -650,13 +650,15 @@ def _lira_score_external_uw(
 # Three weight rules:
 #   - "integer": exact (clip, index) match -> 1; everything else -> 0.
 #   - "half":    exact -> 1; same clip, any index -> 0.5; else -> 0.
-#                (the wednesday-plan default; baseline floor is 0.5/guess
-#                for clip-given attacks like Attack 1.)
+#                (Baseline floor is 0.5/guess for clip-given attacks such as
+#                the paper's Attack 1.  NOT the rule the paper reports; see
+#                README.md.)
 #   - "window":  exact -> 1; same clip and within +-window indices of
-#                ANY true frame -> 0.5; else -> 0.  (Brings back the
-#                temporal-proximity reading from main.tex section 6.2,
-#                where the original paper used a 1% window; default
-#                window=2 here corresponds to 2% on clip_len=100.)
+#                ANY true frame -> 0.5; else -> 0.  This is the
+#                temporal-proximity rule of Section 6 (Experiments) and
+#                Algorithm 2, i.e. the "Weighted" columns of main-paper
+#                Table 2.  default window=2 corresponds to 2% on
+#                clip_len=100.
 def compute_weighted_score(
     guesses:     List[Tuple[int, int]],
     truth:       List[Tuple[int, int]],

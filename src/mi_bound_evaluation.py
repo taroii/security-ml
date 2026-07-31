@@ -1,20 +1,43 @@
-"""Numerically evaluate the mutual-information bound MI(X; M(X)) on real UCF-101
-embeddings across (k, sigma) -- the quantity the calibration theorems bound but
-the paper never computes on real data.
+"""Evaluate the LOG-DETERMINANT FUNCTIONAL of the released Gram matrix on real
+UCF-101 embeddings across (k, sigma). Produces supplement Table 2 and Figure 2
+(Appendix E.3).
 
-For the isotropic-noise mechanism M(X) = X_mix W + B (B ~ N(0,sigma^2 I_d)), the
-per-output-dimension log-channel-capacity is
+For the isotropic-noise mechanism M(X) = X_mix W + B (B ~ N(0,sigma^2 I_d)) we
+compute
     L(sigma) = log det(I_n + sigma^{-2} X_mix X_mix^T)
              = log det(I_{d0} + sigma^{-2} X_mix^T X_mix)     (Sylvester)
-so the Theorem-5 mutual-information UPPER BOUND is
-    MI(X; M(X)) <= (d/2) * L(sigma)                (nats),
-computed here with the fast d0 x d0 (512x512) determinant. We report L per
-datapoint, L(sigma)/n, so the numbers are comparable across k (which changes n).
+via the fast d0 x d0 (512x512) determinant, and report (d/2) * L(sigma)/n so the
+numbers are comparable across k (which changes n).
 
-This closes the loop the empirical section leaves open: it shows the MI bound is
-(i) finite/non-vacuous on the ResNet/embedding features, (ii) monotonically
-decreasing in sigma (~1/sigma^2 at large sigma), and (iii) reduced by class-k
-mixing -- exactly the behavior the calibration theorems assume.
+IMPORTANT -- what this is and is not.  L(sigma) shares the
+log det(I + Sigma_X / sigma^2) structure that appears in the mutual-information
+analysis (Corollary S10 in Appendix D), but it is NOT that bound and NOT a
+certified upper bound on MI(X; M(X)):
+
+  * the Corollary S10 Type-(II) term is a Jensen-gap expectation,
+    log det E_X[.] - E_X log det[.], whereas L is a single-realization
+    log-determinant;
+  * no claim is made here that (d/2) * L numerically bounds MI(X; M(X)).
+
+It is used only as a computable PROXY whose qualitative behaviour in (k, sigma)
+is what the calibration assumes.  Variable and column names retain the
+`mi_bound` prefix for backward compatibility with the shipped CSV; read them as
+"log-determinant functional".  See Appendix E.3 of the supplement, which states
+these caveats in full, including that L decays like ~1/sigma rather than
+1/sigma^2 in the operable band.
+
+What the numbers establish is modest but real: the log-determinant diagnostic is
+(i) finite/non-vacuous on real video embeddings, (ii) monotonically decreasing in
+sigma, and (iii) reduced by class-k mixing.
+
+Embeddings are 512-d clip-level R3D-18 features, a feature space distinct from
+the frame-level ResNet-18 encoder used by the attacks and the downstream
+classifier, so this is an independent probe of the mechanism.
+
+Usage:
+    python src/mi_bound_evaluation.py                     # recompute from embeddings
+    python src/mi_bound_evaluation.py --replot-only       # redraw the figure from
+                                                          # the shipped CSV
 """
 import argparse, os
 import numpy as np, torch
@@ -58,8 +81,43 @@ def logdet_bound(Xmix, sigma):
     return ld / Xmix.shape[0]
 
 
+def plot_curves(curves, img_dir):
+    """Draw supplement Figure 2 from {k: (sigmas, values)}.
+
+    Axis labels deliberately say "log-determinant functional", not "MI bound":
+    the quantity plotted is a proxy, not a certified mutual-information bound
+    (see the module docstring and Appendix E.3).
+    """
+    import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+    os.makedirs(img_dir, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(5.4, 3.8))
+    cols = ["#c0392b", "#2c3e50", "#27ae60"]
+    for (k, (sig, v)), col in zip(sorted(curves.items()), cols):
+        ax.loglog(sig, v, "o-", color=col, label=f"$k={k}$ mixing")
+    ax.set_xlabel(r"noise std. dev. $\sigma$")
+    ax.set_ylabel(r"log-det functional per datapoint (nats)")
+    ax.set_title("Log-determinant functional on real UCF-101 embeddings")
+    ax.legend(fontsize=8); ax.grid(True, which="both", alpha=0.3)
+    fig.tight_layout()
+    p = os.path.join(img_dir, "fig_mi_bound_real.pdf")
+    fig.savefig(p, dpi=200, bbox_inches="tight")
+    fig.savefig(p.replace(".pdf", ".png"), dpi=140, bbox_inches="tight")
+    print(f"\nFigure -> {p}")
+    return p
+
+
+def curves_from_csv(csv_path):
+    import pandas as pd
+    df = pd.read_csv(csv_path)
+    return {int(k): (g["sigma"].tolist(), g["mi_bound_per_n"].tolist())
+            for k, g in df.sort_values("sigma").groupby("k")}
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--replot-only", action="store_true",
+                    help="Skip recomputation; redraw the figure from the "
+                         "shipped mi_bound_real.csv (no dataset needed).")
     ap.add_argument("--embed", default="ucf101_r3d18_embed.pt")
     ap.add_argument("--n0", type=int, default=50)
     ap.add_argument("--d", type=int, default=500, help="projection/output dim (MI prefactor d/2)")
@@ -71,6 +129,11 @@ def main():
     ap.add_argument("--img-dir", default="./images")
     args = ap.parse_args()
 
+    if args.replot_only:
+        csv_path = os.path.join(args.out_dir, "mi_bound_real.csv")
+        plot_curves(curves_from_csv(csv_path), args.img_dir)
+        return
+
     obj = torch.load(args.embed, map_location="cpu", weights_only=False)
     X = obj["Xtr"].numpy().astype(np.float64)
     y = obj["ytr"].numpy().astype(int)
@@ -81,7 +144,7 @@ def main():
     print(f"subset: {Xn.shape}, classes={c}")
 
     rows = []
-    print(f"\n{'k':>3} {'sigma':>7} {'MI_bound/n (nats)':>18} {'MI_bound (nats)':>16}")
+    print(f"\n{'k':>3} {'sigma':>7} {'logdet/n (nats)':>18} {'logdet (nats)':>16}")
     curves = {}
     for k in args.ks:
         Xmix = Xn if k == 0 else class_k_mix(Xn, yn, c, k, args.seed)
@@ -111,21 +174,7 @@ def main():
                   f"{ratio:.3f}  (1/sigma^2 predicts {exp:.3f})")
 
     try:
-        import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-        os.makedirs(args.img_dir, exist_ok=True)
-        fig, ax = plt.subplots(figsize=(5.4, 3.8))
-        cols = ["#c0392b", "#2c3e50", "#27ae60"]
-        for (k, (sig, v)), col in zip(sorted(curves.items()), cols):
-            ax.loglog(sig, v, "o-", color=col, label=f"$k={k}$ mixing")
-        ax.set_xlabel(r"noise std.\ dev.\ $\sigma$")
-        ax.set_ylabel(r"MI bound per datapoint (nats)")
-        ax.set_title("Theorem-5 MI bound on real UCF-101 embeddings")
-        ax.legend(fontsize=8); ax.grid(True, which="both", alpha=0.3)
-        fig.tight_layout()
-        p = os.path.join(args.img_dir, "fig_mi_bound_real.pdf")
-        fig.savefig(p, dpi=200, bbox_inches="tight")
-        fig.savefig(p.replace(".pdf", ".png"), dpi=140, bbox_inches="tight")
-        print(f"\nFigure -> {p}")
+        plot_curves(curves, args.img_dir)
     except Exception as e:
         print(f"[skip figure] {e}")
 

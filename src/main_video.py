@@ -669,8 +669,15 @@ if __name__ == "__main__":
 
     os.makedirs(args.results_dir, exist_ok=True)
 
+    # The seed is part of the filename for every seed except the default 42,
+    # whose filename is left bare for backward compatibility. Without this,
+    # a second seed would collide with the first seed's output and be
+    # silently skipped by the guard below, so multi-seed sweeps would report
+    # one run repeated rather than independent runs.
+    seed_tag = "" if args.seed == 42 else f"_seed{args.seed}"
     out_path = os.path.join(
-        args.results_dir, f"acc_k{args.k}_sigma{args.sigma:.4f}.csv"
+        args.results_dir,
+        f"acc_k{args.k}_sigma{args.sigma:.4f}{seed_tag}.csv",
     )
     if os.path.exists(out_path):
         print(f"[skip] {out_path} already exists")

@@ -1,11 +1,11 @@
 """Synthetic controlled-correlation study of temporal membership leakage.
 
-Reviewer A's objection has two empirical parts:
+Two empirical questions motivate this study:
 
-  (1) the analysis credits near-miss guesses but never shows that temporal
-      proximity actually leaks membership, and
-  (2) it is unclear that independent per-frame noise is appropriate when a
-      model jointly processes correlated frames.
+  (1) the analysis credits near-miss guesses, but does temporal proximity
+      actually leak membership? and
+  (2) is independent per-frame noise appropriate when a model jointly
+      processes correlated frames?
 
 On real video the correlation is uncontrolled, so the effect cannot be
 isolated. Here we generate synthetic clips whose intra-clip temporal
@@ -33,7 +33,9 @@ membership_inference.precompute_trial) and its LiRA scoring, and measure:
   Experiment C -- i.i.d. vs temporally-correlated noise:  at matched noise
      budget, whether shaping the mechanism noise to be correlated within a
      clip defends the joint-processing adversary better than independent
-     per-frame noise -- the design question Reviewer A raised.
+     per-frame noise -- the design question raised by (2) above, and the
+     empirical counterpart of Theorem S8 (privacy-preserving correlated
+     noise) in Appendix B.5 of the supplement.
 
 Self-contained: needs no dataset, runs in a couple of minutes, reuses the
 audited mechanism and scoring from membership_inference.py.

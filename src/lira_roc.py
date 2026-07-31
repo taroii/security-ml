@@ -18,9 +18,9 @@ Two membership tests, both on the real UCF-101 frame universe:
   A1  within-clip index inference.  Candidate set = the CLIP_LEN=100 frames of
       the target clip.  MEMBERS = the 16 frames that were actually sampled into
       the universe U; NON-MEMBERS = the other 84 frames of the *same* clip.
-      This is exactly the reviewer's "nearby correlated frames" concern made
-      quantitative: can the adversary separate the 16 real members from their
-      84 temporal neighbours?
+      This makes the "nearby correlated frames" question quantitative: can the
+      adversary separate the 16 real members from their 84 temporal
+      neighbours?
 
   A3  universe-scale frame MIA.  Candidate set = a subsampled universe pool plus
       the 16 target rows.  MEMBERS = the 16 target rows; NON-MEMBERS = the rest
@@ -40,6 +40,18 @@ U@W matmul -- once per (target,trial).  For an ROC we instead draw one mechanism
 per trial and probe every target against it, cutting the matmul count from
 n_targets*n_trials down to n_trials with no loss of validity (each query is
 standardised against its own null).
+
+Produces supplement Table 3 and Figure 3 (Appendix E.4).
+
+Modes:
+    python src/lira_roc.py            # run: compute, write CSV + curves + figure
+    python src/lira_roc.py plot       # re-render the figure from saved curves
+    python src/lira_roc.py verify     # self-checks on the computed results
+
+`run` writes lira_roc_summary.csv (Table 3) and lira_roc_curves.npz to
+--out-dir, and fig_lira_roc.pdf (Figure 3) to --img-dir. `plot` needs only the
+npz, so the figure can be restyled without recomputing. `verify` exits non-zero
+if a hard check fails.
 """
 import argparse
 import os
@@ -55,6 +67,9 @@ from membership_inference import (          # noqa: E402
     lira_score_frame_candidates,
     load_full_clip_gray,
 )
+
+OUT_DIR = "./results_revision"
+IMG_DIR = "./images"
 
 
 # ----------------------------------------------------------------------------
@@ -267,7 +282,7 @@ def summarise(store, k, sigma, attack):
     ), (fpr, tpr)
 
 
-def main():
+def run_evaluation():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pool", default="ucf101_frame_pool_gray_random_len100.npz")
     ap.add_argument("--video-root", default="./data/UCF-101")
@@ -281,8 +296,8 @@ def main():
     ap.add_argument("--clip-len", type=int, default=100)
     ap.add_argument("--size", type=int, default=112)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--out-dir", default="./results_revision")
-    ap.add_argument("--img-dir", default="./images")
+    ap.add_argument("--out-dir", default=OUT_DIR)
+    ap.add_argument("--img-dir", default=IMG_DIR)
     args = ap.parse_args()
 
     obj = np.load(args.pool, allow_pickle=True)
@@ -354,52 +369,191 @@ def main():
     print(f"\nWrote {csv_path}")
     print(df.to_string(index=False))
 
-    _plot(curves, args)
+    plot_roc(curves, args.out_dir, args.img_dir)
 
 
-def _plot(curves, args):
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception as e:
-        print(f"[skip figure] {e}")
-        return
-    os.makedirs(args.img_dir, exist_ok=True)
-    fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.1))
-    # Panel A: same-class attribution MIA, k=0, across sigma (log-log LiRA ROC)
-    axA = axes[0]
-    cols = ["#7f8c8d", "#c0392b", "#2c3e50", "#27ae60", "#8e44ad"]
-    for sigma, col in zip(args.sigmas, cols):
-        fk, tk = f"A3_sameclass_k0_s{sigma}_fpr", f"A3_sameclass_k0_s{sigma}_tpr"
-        if fk in curves:
-            f, t = curves[fk], curves[tk]
-            f = np.clip(f, 1e-5, 1); t = np.clip(t, 1e-5, 1)
-            axA.loglog(f, t, "-", color=col, label=rf"$\sigma={sigma}$")
-    axA.plot([1e-5, 1], [1e-5, 1], "k--", lw=0.8, alpha=0.6)
+
+
+# ----------------------------------------------------------------------------
+# Figure: supplement Figure 3 (fig_lira_roc.pdf)
+# ----------------------------------------------------------------------------
+
+def plot_roc(curves, out_dir=OUT_DIR, img_dir=IMG_DIR):
+    """Render supplement Figure 3 from ROC curves.
+
+    Panel A: the three adversaries at (k=0, sigma=0.10) -- the hardness
+             gradient (informed within-clip near chance; the uninformed
+             identification adversaries confident).
+    Panel B: the uninformed cross-class adversary at sigma=0.10 across mixing k.
+
+    `curves` may be the in-memory dict from run_evaluation or a loaded npz.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    df = pd.read_csv(os.path.join(out_dir, "lira_roc_summary.csv"))
+
+    def auc_of(tag, k, s):
+        r = df[(df.attack == tag) & (df.k == k) & (df.sigma == s)]
+        return float(r["auc_pooled"].iloc[0]) if len(r) else float("nan")
+
+    def curve(tag, k, s):
+        fk, tk = f"{tag}_k{k}_s{s}_fpr", f"{tag}_k{k}_s{s}_tpr"
+        if fk not in curves:
+            return None
+        return np.clip(curves[fk], 1e-5, 1.0), np.clip(curves[tk], 1e-5, 1.0)
+
+    os.makedirs(img_dir, exist_ok=True)
+    fig, (axA, axB) = plt.subplots(1, 2, figsize=(9.4, 4.2))
+    sA = 0.1
+
+    specs = [
+        ("A3_crossclass",  "Uninformed (vs. unrelated)",   "#c0392b"),
+        ("A3_sameclass",   "Uninformed (vs. same class)",  "#e08e0b"),
+        ("A1_within_clip", "Informed (vs. own neighbors)", "#2c3e50"),
+    ]
+    for tag, lab, col in specs:
+        c = curve(tag, 0, sA)
+        if c is None:
+            continue
+        axA.loglog(c[0], c[1], "-", color=col, lw=1.8,
+                   label=f"{lab}, AUC={auc_of(tag, 0, sA):.2f}")
+    axA.plot([1e-5, 1], [1e-5, 1], "k--", lw=0.8, alpha=0.6, label="chance")
     axA.set_xlim(1e-4, 1); axA.set_ylim(1e-3, 1)
     axA.set_xlabel("False positive rate"); axA.set_ylabel("True positive rate")
-    axA.set_title(r"Same-class frame MIA ($k=0$), vs.\ noise")
-    axA.legend(fontsize=7, loc="lower right"); axA.grid(True, which="both", alpha=0.25)
-    # Panel B: mixing at fixed sigma=0.10 (same-class)
-    axB = axes[1]
-    for k, col in zip(args.ks, ["#c0392b", "#2c3e50", "#27ae60"]):
-        fk, tk = f"A3_sameclass_k{k}_s0.1_fpr", f"A3_sameclass_k{k}_s0.1_tpr"
-        if fk in curves:
-            f, t = curves[fk], curves[tk]
-            f = np.clip(f, 1e-5, 1); t = np.clip(t, 1e-5, 1)
-            axB.loglog(f, t, "-", color=col, label=rf"$k={k}$ mixing")
-    axB.plot([1e-5, 1], [1e-5, 1], "k--", lw=0.8, alpha=0.6)
+    axA.set_title("Three adversaries at $(k{=}0,\\ \\sigma{=}0.10)$")
+    axA.legend(fontsize=7.5, loc="lower right")
+    axA.grid(True, which="both", alpha=0.25)
+
+    for k, col in zip([0, 1, 5], ["#c0392b", "#2c3e50", "#27ae60"]):
+        c = curve("A3_crossclass", k, sA)
+        if c is None:
+            continue
+        axB.loglog(c[0], c[1], "-", color=col, lw=1.8,
+                   label=f"$k={k}$, AUC={auc_of('A3_crossclass', k, sA):.2f}")
+    axB.plot([1e-5, 1], [1e-5, 1], "k--", lw=0.8, alpha=0.6, label="chance")
     axB.set_xlim(1e-4, 1); axB.set_ylim(1e-3, 1)
     axB.set_xlabel("False positive rate"); axB.set_ylabel("True positive rate")
-    axB.set_title(r"Same-class frame MIA ($\sigma=0.10$), vs.\ mixing")
-    axB.legend(fontsize=7, loc="lower right"); axB.grid(True, which="both", alpha=0.25)
+    axB.set_title("Uninformed adversary vs. mixing $(\\sigma{=}0.10)$")
+    axB.legend(fontsize=7.5, loc="lower right")
+    axB.grid(True, which="both", alpha=0.25)
+
     fig.tight_layout()
-    p = os.path.join(args.img_dir, "fig_lira_roc.pdf")
+    p = os.path.join(img_dir, "fig_lira_roc.pdf")
     fig.savefig(p, dpi=200, bbox_inches="tight")
     fig.savefig(p.replace(".pdf", ".png"), dpi=140, bbox_inches="tight")
     print(f"Figure -> {p}")
 
 
+def replot(out_dir=OUT_DIR, img_dir=IMG_DIR):
+    """Re-render the figure from saved curves, with no recomputation."""
+    curves = np.load(os.path.join(out_dir, "lira_roc_curves.npz"))
+    plot_roc(curves, out_dir, img_dir)
+
+
+# ----------------------------------------------------------------------------
+# Self-checks on the computed results
+# ----------------------------------------------------------------------------
+
+def verify(out_dir=OUT_DIR):
+    """Sanity-check the ROC results. Returns the number of hard failures.
+
+    From lira_roc_summary.csv + lira_roc_curves.npz:
+      (C1) every AUC in [0,1]; pooled AUC within 0.06 of per-query-mean AUC
+           (two ways of measuring the same thing -> must roughly agree).
+      (C2) monotone privacy: for a fixed attack & k, AUC is non-increasing in
+           sigma (more noise cannot HELP the attack, MC tolerance 0.03).
+      (C3) hardness ordering at each (k,sigma): A1_within_clip <= A3_sameclass
+           <= A3_crossclass (same members, progressively easier non-members).
+      (C4) TPR@FPR sanity: 0 <= TPR@0.1% <= TPR@1% <= 1; advantage in [0,1].
+      (C5) ROC curve shape: fpr,tpr monotone nondecreasing, running 0 -> 1.
+
+    C1/C2/C3 and the C5 endpoint check are reported as warnings, since each has
+    a legitimate Monte-Carlo explanation; range and ordering violations, which
+    do not, are hard failures.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(os.path.join(out_dir, "lira_roc_summary.csv"))
+    curves = np.load(os.path.join(out_dir, "lira_roc_curves.npz"))
+    fails, warns = [], []
+
+    for _, r in df.iterrows():
+        tag = f"{r['attack']} k{r['k']} s{r['sigma']}"
+        if not (0.0 <= r["auc_pooled"] <= 1.0):
+            fails.append(f"C1 AUC out of range: {tag} auc={r['auc_pooled']}")
+        if abs(r["auc_pooled"] - r["auc_perquery_mean"]) > 0.06:
+            warns.append(f"C1 pooled vs per-query AUC differ: {tag} "
+                         f"{r['auc_pooled']} vs {r['auc_perquery_mean']}")
+
+    for attack in df["attack"].unique():
+        for k in sorted(df["k"].unique()):
+            sub = df[(df.attack == attack) & (df.k == k)].sort_values("sigma")
+            a = sub["auc_pooled"].to_numpy()
+            s = sub["sigma"].to_numpy()
+            for i in range(1, len(a)):
+                if a[i] > a[i - 1] + 0.03:
+                    warns.append(f"C2 AUC rises with sigma: {attack} k={k} "
+                                 f"sigma {s[i-1]}->{s[i]} "
+                                 f"{a[i-1]:.3f}->{a[i]:.3f}")
+
+    order = ("A1_within_clip", "A3_sameclass", "A3_crossclass")
+    for (k, s), g in df.groupby(["k", "sigma"]):
+        m = {row["attack"]: row["auc_pooled"] for _, row in g.iterrows()}
+        if all(a in m for a in order):
+            seq = [m[a] for a in order]
+            for i in range(1, len(seq)):
+                if seq[i] < seq[i - 1] - 0.05:
+                    warns.append(f"C3 hardness order broken at k={k},s={s}: "
+                                 f"A1={seq[0]:.3f} A3s={seq[1]:.3f} "
+                                 f"A3x={seq[2]:.3f}")
+
+    for _, r in df.iterrows():
+        tag = f"{r['attack']} k{r['k']} s{r['sigma']}"
+        if not (0 <= r["tpr_at_fpr0p1pct"]
+                <= r["tpr_at_fpr1pct"] + 1e-9 <= 1 + 1e-9):
+            fails.append(f"C4 TPR ordering: {tag} "
+                         f"0.1%={r['tpr_at_fpr0p1pct']} "
+                         f"1%={r['tpr_at_fpr1pct']}")
+        if not (-1e-9 <= r["advantage"] <= 1 + 1e-9):
+            fails.append(f"C4 advantage out of range: {tag} "
+                         f"adv={r['advantage']}")
+
+    for key in curves.files:
+        if not key.endswith("_fpr"):
+            continue
+        f = curves[key]
+        t = curves[key[:-4] + "_tpr"]
+        if len(f) < 2:
+            continue
+        if np.any(np.diff(f) < -1e-9) or np.any(np.diff(t) < -1e-9):
+            fails.append(f"C5 non-monotone ROC: {key[:-4]}")
+        if (abs(f[0]) > 1e-6 or abs(t[0]) > 1e-6
+                or abs(f[-1] - 1) > 1e-6 or abs(t[-1] - 1) > 1e-6):
+            warns.append(f"C5 ROC endpoints off: {key[:-4]} "
+                         f"f[{f[0]:.3g},{f[-1]:.3g}] "
+                         f"t[{t[0]:.3g},{t[-1]:.3g}]")
+
+    print("=== WARNINGS ===")
+    for w in warns:
+        print(" ", w)
+    print("=== FAILURES ===")
+    for x in fails:
+        print(" ", x)
+    print(f"\n{len(warns)} warnings, {len(fails)} failures")
+    return len(fails)
+
+
 if __name__ == "__main__":
-    main()
+    mode = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") \
+        else "run"
+    if mode == "run":
+        run_evaluation()
+    elif mode == "plot":
+        replot()
+    elif mode == "verify":
+        sys.exit(1 if verify() else 0)
+    else:
+        sys.exit(f"unknown mode {mode!r}; expected run | plot | verify")

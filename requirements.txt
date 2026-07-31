@@ -1,7 +1,24 @@
-ipykernel
-opencv-python
-numpy
-rarfile
-matplotlib
-scipy
-pandas
+# Pinned to the environment that produced the reported numbers, matching
+# Appendix E.1 (Implementation and Compute Environment) of the technical
+# supplement. Every pin below was verified to exist on PyPI with a
+# cp311/macOS-arm64 wheel, so this file installs as written on the reported
+# platform (Apple silicon, PyTorch MPS backend, no CUDA GPU).
+#
+#   conda create -n security python=3.11.14
+#   conda activate security
+#   pip install -r requirements.txt
+#
+# On a CUDA machine, install torch/torchvision from the PyTorch index instead
+# (https://pytorch.org/get-started/locally/), then install the rest.
+#
+# Appendix E.1 cites OpenCV 5.0.0; 5.0.0.93 is the corresponding
+# opencv-python distribution version on PyPI.
+
+torch==2.13.0
+torchvision==0.28.0
+numpy==2.4.6
+scipy==1.17.1
+pandas==3.0.3
+matplotlib==3.11.1
+opencv-python==5.0.0.93
+rarfile==4.2

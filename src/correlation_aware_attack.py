@@ -1,17 +1,14 @@
 """Correlation-aware temporal membership inference.
 
-Directly answers Reviewer A's central request:
+Evaluates privacy leakage under a membership inference adversary that
+exploits the temporal correlation the calibration assumes away, testing
+whether independent per-frame noise is appropriate for models that must
+jointly process correlated frames (Appendix B of the supplement).
 
-  "Given these correlations, I expected the paper to evaluate privacy leakage
-   using a standard membership inference attack, which could help demonstrate
-   whether the privacy guarantees ... are substantially overestimated ...
-   it is less clear that [independent per-frame noise] is appropriate for
-   models that must jointly process correlated frames."
-
-The paper's Attack 3 scores every candidate frame INDEPENDENTLY and takes the
-top-T -- a correlation-BLIND adversary that treats frames as i.i.d., exactly
-the assumption the reviewer says is disconnected from practice. This module
-adds a correlation-AWARE adversary that pools the per-frame likelihood-ratio
+The paper's frame-level attack scores every candidate frame INDEPENDENTLY
+and takes the top-T -- a correlation-BLIND adversary that treats frames as
+i.i.d., which is the assumption the calibration rests on. This module adds a
+correlation-AWARE adversary that pools the per-frame likelihood-ratio
 evidence across frames of the same clip before deciding, mirroring the
 two-level prior (winning one clip delivers a block of correlated credit).
 
@@ -22,9 +19,10 @@ correlation the flat analysis ignores, and tests whether the i.i.d.-
 calibrated noise the paper certifies actually protects against an adversary
 that uses the dependence.
 
-Reported per (k, sigma) cell:
-  * blind Attack 3        : top-T independent frames (paper's adversary)
-  * clip-aware Attack 3   : rank clips by aggregated LR, then allocate the T
+Reported per (k, sigma) cell (code "attack 3" == paper's Attack 2, the
+frame-level membership adversary; see README.md for the full column map):
+  * blind attack 3        : top-T independent frames (paper's adversary)
+  * clip-aware attack 3   : rank clips by aggregated LR, then allocate the T
                             guesses within the best clip(s)
   * target-clip rank      : where the true target clip lands under aggregation
                             (top-1 accuracy = correlation-aware clip inference)
@@ -69,8 +67,8 @@ def clip_aggregated_scores(
     Returns {clip_id: aggregated_score}. The correlation-aware adversary
     exploits that a member clip contributes SEVERAL elevated-LR frames, so
     pooling their evidence separates member from non-member clips far better
-    than any single frame does -- precisely the joint-processing leakage the
-    reviewer flagged.
+    than any single frame does -- precisely the joint-processing leakage that
+    the i.i.d. calibration does not account for.
 
     agg:
       "sum"  -- total evidence (favours clips with many pooled frames)

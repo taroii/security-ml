@@ -217,10 +217,8 @@ ucf101_r3d18_embed.pt
 
 .DS_Store
 
-*.csv
-!results/*.csv
-!accuracy_results/*.csv
 *.md
+!README.md
 logs/
 attack_results_10_trials/cache/
 cache/
@@ -230,13 +228,25 @@ cache/
 data/UCF-101/
 data/ucfTrainTestlist/
 
-# --- Revision work (added for CCS revision push) ---
 .venv-rev/
 .venv-*/
-# keep curated revision docs and result CSVs despite *.md / *.csv rules above
-!revision/
-!revision/**
-!results_revision/
-!results_revision/*.csv
-!paper/
-!paper/**
+
+temp/
+
+# --- Generated outputs ---
+# The repo ships CODE ONLY. Everything below is produced by running the
+# scripts in src/ and is regenerated rather than version-controlled, so that
+# the code supplement stays lean and there is exactly one source of truth for
+# every number: the code that computes it.
+*.csv
+results/
+results_revision/
+accuracy_results/
+images/
+merged_results.csv
+merged_accuracy.csv
+
+# --- Working notes (not part of the submission) ---
+revision/
+paper/
+responses.md
