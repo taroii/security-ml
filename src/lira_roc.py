@@ -41,15 +41,15 @@ per trial and probe every target against it, cutting the matmul count from
 n_targets*n_trials down to n_trials with no loss of validity (each query is
 standardised against its own null).
 
-Produces supplement Table 3 and Figure 3 (Appendix E.4).
+Produces Table 5 and Figure 4 (Appendix E.4).
 
 Modes:
     python src/lira_roc.py            # run: compute, write CSV + curves + figure
     python src/lira_roc.py plot       # re-render the figure from saved curves
     python src/lira_roc.py verify     # self-checks on the computed results
 
-`run` writes lira_roc_summary.csv (Table 3) and lira_roc_curves.npz to
---out-dir, and fig_lira_roc.pdf (Figure 3) to --img-dir. `plot` needs only the
+`run` writes lira_roc_summary.csv (Table 5) and lira_roc_curves.npz to
+--out-dir, and fig_lira_roc.pdf (Figure 4) to --img-dir. `plot` needs only the
 npz, so the figure can be restyled without recomputing. `verify` exits non-zero
 if a hard check fails.
 """
@@ -375,11 +375,11 @@ def run_evaluation():
 
 
 # ----------------------------------------------------------------------------
-# Figure: supplement Figure 3 (fig_lira_roc.pdf)
+# Figure: Figure 4 of the paper (fig_lira_roc.pdf)
 # ----------------------------------------------------------------------------
 
 def plot_roc(curves, out_dir=OUT_DIR, img_dir=IMG_DIR):
-    """Render supplement Figure 3 from ROC curves.
+    """Render Figure 4 (Appendix E.4) from ROC curves.
 
     Panel A: the three adversaries at (k=0, sigma=0.10) -- the hardness
              gradient (informed within-clip near chance; the uninformed

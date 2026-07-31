@@ -1,5 +1,5 @@
 """Evaluate the LOG-DETERMINANT FUNCTIONAL of the released Gram matrix on real
-UCF-101 embeddings across (k, sigma). Produces supplement Table 2 and Figure 2
+UCF-101 embeddings across (k, sigma). Produces Table 4 and Figure 3
 (Appendix E.3).
 
 For the isotropic-noise mechanism M(X) = X_mix W + B (B ~ N(0,sigma^2 I_d)) we
@@ -82,7 +82,7 @@ def logdet_bound(Xmix, sigma):
 
 
 def plot_curves(curves, img_dir):
-    """Draw supplement Figure 2 from {k: (sigmas, values)}.
+    """Draw Figure 3 (Appendix E.3) from {k: (sigmas, values)}.
 
     Axis labels deliberately say "log-determinant functional", not "MI bound":
     the quantity plotted is a proxy, not a certified mutual-information bound

@@ -5,16 +5,16 @@ membership_inference.py and main_video.py -- no mechanism or scoring logic
 lives in this file.
 
   attacks   results/attack_k*_sigma*.csv       -> merged_results.csv
-            Backs main-paper Table 2 and supplement Table 6.
+            Backs Table 2 (main paper) and Table 8 (Appendix F.1).
 
   accuracy  accuracy_results/acc_k*_sigma*.csv -> merged_accuracy.csv
-            Backs supplement Table 1. When several seeds are present it also
+            Backs Table 3 (Appendix E.2). When several seeds are present it also
             writes merged_accuracy_by_seed.csv with mean/std/SEM per cell.
 
   pareto    joins the two above                -> results_revision/
                                                   privacy_utility_pareto.csv
                                                   + images/fig_privacy_utility.pdf
-            Backs supplement Table 4 and Figure 6 (Appendix E.5): uninformed
+            Backs Table 6 and Figure 5 (Appendix E.5): uninformed
             adversary leakage against downstream accuracy, with the
             no-obfuscation point as the reference.
 
@@ -95,7 +95,7 @@ def merge_accuracy(results_dir=ACCURACY_DIR, output="./merged_accuracy.csv"):
 
 def build_pareto(results_dir=RESULTS_DIR, accuracy_dir=ACCURACY_DIR,
                  out_dir=REVISION_DIR, img_dir=IMG_DIR):
-    """Join leakage and accuracy onto a common axis (supplement Table 4).
+    """Join leakage and accuracy onto a common axis (Table 6, Appendix E.5).
 
     `leak_red` is the relative reduction against the no-obfuscation leakage and
     `acc_gap` the absolute gain over the no-obfuscation accuracy, so a cell
@@ -140,7 +140,7 @@ def build_pareto(results_dir=RESULTS_DIR, accuracy_dir=ACCURACY_DIR,
 
 
 def _plot_pareto(df, img_dir=IMG_DIR):
-    """Privacy--utility frontier (supplement Figure 6).
+    """Privacy--utility frontier (Figure 5, Appendix E.5).
 
     Accuracy on the x-axis, leakage on the y-axis (lower is more private), so
     the desirable direction is down-and-right and a point Pareto-dominates the

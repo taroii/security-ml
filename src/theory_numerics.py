@@ -16,7 +16,7 @@ argument rather than from running the mechanism on video:
                   half-integer weights, on the illustrative scenario
                   N=1000, n=50, m=100.
 
-  frame-survival  supplement Table 7 (Appendix F.2). Expected target-clip
+  frame-survival  Table 9 (Appendix F.2). Expected target-clip
                   signal mass under class-k mixing, showing it is
                   c/n_0 = 2.02 independently of k for every k >= 1.
 
@@ -55,7 +55,7 @@ SCENARIO_N = 1000        # universe size
 SCENARIO_n = 50          # truth-set size
 SCENARIO_m = 100         # half-credit zone size
 
-# Frame-survival (supplement Table 7).
+# Frame-survival (Table 9, Appendix F.2).
 N_CLASSES = 101          # c
 N_PER_CLASS = 50         # n_0
 K_TABLE = [0, 1, 2, 3, 5, 10]
@@ -346,7 +346,7 @@ def run_prior_figure():
 
 
 # ----------------------------------------------------------------------
-# frame-survival -- supplement Table 7
+# frame-survival -- Table 9 (Appendix F.2)
 # ----------------------------------------------------------------------
 
 def run_frame_survival():
@@ -356,7 +356,7 @@ def run_frame_survival():
     each carrying weight 1/(2k) from the k-fold averaging, so the total
     signal mass is c/n_0 -- independent of k. A first-moment argument
     therefore predicts no variation in attack difficulty across k >= 1, which
-    is what supplement Table 7 reports.
+    is what Table 9 reports.
     """
     print(f"Target-clip frame survival (closed-form; c={N_CLASSES}, "
           f"n_0={N_PER_CLASS})")
